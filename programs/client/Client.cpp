@@ -999,6 +999,7 @@ void Client::addAndCheckOptions(OptionsDescription & options_description, po::va
         ("config,c", po::value<std::string>(), "config-file path (another shorthand)")
         ("host,h", po::value<std::string>()->default_value("localhost"), "server host")
         ("port", po::value<int>()->default_value(9000), "server port")
+        ("connection-string", po::value<std::string>(), "connection string")
         ("secure,s", "Use TLS connection")
         ("user,u", po::value<std::string>()->default_value("default"), "user")
         /** If "--password [value]" is used but the value is omitted, the bad argument exception will be thrown.
@@ -1166,6 +1167,9 @@ void Client::processOptions(const OptionsDescription & options_description,
 
     if (options.count("opentelemetry-tracestate"))
         global_context->getClientInfo().client_trace_context.tracestate = options["opentelemetry-tracestate"].as<std::string>();
+
+    if (options.count("connection-string"))
+        std::cout << options["connection-string"].as<std::string>() << std::endl;
 }
 
 
