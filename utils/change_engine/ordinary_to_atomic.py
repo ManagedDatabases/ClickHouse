@@ -47,8 +47,11 @@ class DBOrdinaryToAtomicConverter:
         atomic_database = Database(self.__get_atomic_name(ordinary_name), self.__client)
 
         if self.__finished_previous_sessions(ordinary_database, atomic_database):
-            assert ordinary_database.exist, 'ordinary database does not exist'
-            assert ordinary_database.engine == 'Ordinary', f'database {ordinary_database.name} engine must be Ordinary'
+            if not ordinary_database.exist:
+                raise ValueError(f'ordinary database \'{ordinary_database.name}\' does not exist')
+
+            if ordinary_database.engine != 'Ordinary':
+                raise ValueError(f'database {ordinary_database.name} engine must be Ordinary')
 
             atomic_database.create(engine = 'Atomic')
             tables = ordinary_database.tables
