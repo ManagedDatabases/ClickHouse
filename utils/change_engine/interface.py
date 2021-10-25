@@ -17,7 +17,7 @@ class Table:
 
     @property
     def exist(self):
-        tables = self.__client.execute(f'SELECT name FROM system.tables WHERE database == {self.database_name} and name == \'{self.name}\'')
+        tables = self.__client.execute(f'SELECT name FROM system.tables WHERE database == \'{self.database_name}\' and name == \'{self.name}\'')
         return len(tables) == 1
 
     def create(self):
@@ -66,6 +66,8 @@ class Database:
             return Table(f'{self.name}.{table_name}', self.__client)
 
         tables = self.__client.execute(f'SELECT name FROM system.tables WHERE database == \'{self.name}\'')
+        tables = map(lambda row: row[0], tables)
+
         return {name: construct_table(name) for name in tables}
 
     def get_table(self, table_name):

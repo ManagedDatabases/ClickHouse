@@ -53,9 +53,9 @@ class DBOrdinaryToAtomicConverter:
             atomic_database.create(engine = 'Atomic')
             tables = ordinary_database.tables
 
-            for table in tables:
-                ordinary_table = ordinary_database.get_table(table)
-                atomic_table_name = f'{atomic_database.name}.{table}'
+            for table_name, table in tables.items():
+                ordinary_table = ordinary_database.get_table(table_name)
+                atomic_table_name = f'{atomic_database.name}.{table_name}'
                 ordinary_table.rename(atomic_table_name)
 
             ordinary_database.drop()
