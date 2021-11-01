@@ -512,6 +512,7 @@ catch (...)
 
 void Client::connect()
 {
+    config().setString("host", hosts[0]);
     connection_parameters = ConnectionParameters(config());
 
     if (is_interactive)
@@ -998,7 +999,7 @@ void Client::addAndCheckOptions(OptionsDescription & options_description, po::va
     /// Main commandline options related to client functionality and all parameters from Settings.
     options_description.main_description->add_options()
         ("config,c", po::value<std::string>(), "config-file path (another shorthand)")
-        ("host,h", po::value<std::string>()->default_value("localhost"), "server host")
+        ("host,h", po::value<std::vector<std::string>>()->multitoken()->default_value({"localhost"}, "localhost"), "list of server hosts")
         ("port", po::value<int>()->default_value(9000), "server port")
         ("secure,s", "Use TLS connection")
         ("user,u", po::value<std::string>()->default_value("default"), "user")
@@ -1120,7 +1121,7 @@ void Client::processOptions(const OptionsDescription & options_description,
     if (options.count("config"))
         config().setString("config-file", options["config"].as<std::string>());
     if (options.count("host") && !options["host"].defaulted())
-        config().setString("host", options["host"].as<std::string>());
+        hosts = options["host"].as<std::vector<std::string>>();
     if (options.count("interleave-queries-file"))
         interleave_queries_files = options["interleave-queries-file"].as<std::vector<std::string>>();
     if (options.count("pager"))
