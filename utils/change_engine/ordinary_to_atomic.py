@@ -23,7 +23,7 @@ class DBOrdinaryToAtomicConverter:
         return f'{self.__atomic_prefix}{ordinary_name}'
 
     def __finished_previous_sessions(self, ordinary_database, atomic_database):
-        if atomic_database.exist:
+        if atomic_database.exists:
             answer = self.__user_interactor.ask(
                 f'Changing for database {ordinary_database.name} failed in previous launch.\n'
                  'Do you want to continue changing? (y/n)\n'
@@ -34,7 +34,7 @@ class DBOrdinaryToAtomicConverter:
                 ordinary_database.drop()
                 atomic_database.rename(ordinary_database.name)
             elif answer == 'n':
-                if not ordinary_database.exist:
+                if not ordinary_database.exists:
                     ordinary_database.create()
 
                 ordinary_database.move_tables(atomic_database.tables)
@@ -51,8 +51,8 @@ class DBOrdinaryToAtomicConverter:
         atomic_database = Database(self.__get_atomic_name(ordinary_name), self.__client)
 
         if self.__finished_previous_sessions(ordinary_database, atomic_database):
-            if not ordinary_database.exist:
-                raise ValueError(f'ordinary database \'{ordinary_database.name}\' does not exist')
+            if not ordinary_database.exists:
+                raise ValueError(f'ordinary database \'{ordinary_database.name}\' does not exists')
 
             if ordinary_database.engine != 'Ordinary':
                 raise ValueError(f'database {ordinary_database.name} engine must be Ordinary')
