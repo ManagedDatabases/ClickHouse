@@ -27,14 +27,17 @@ class Table:
 
     def rename(self, new_name):
         if self.exist:
-            self.__client.execute(f'RENAME TABLE {self.name} TO {new_name}')
+            self.__client.execute(f'RENAME TABLE {self.fullname} TO {new_name}')
 
         self.__name = new_name
 
-    def drop(self):
-        assert self.exist, f'Table {self.name} does not exist'
+    def change_database(self, new_database):
+        self.rename(f'{new_database}.{self.name}')
 
-        self.__client.execute(f'DROP TABLE {self.name}')
+    def drop(self):
+        assert self.exist, f'Table {self.fullname} does not exist'
+
+        self.__client.execute(f'DROP TABLE {self.fullname}')
 
 
 class Database:
@@ -68,7 +71,7 @@ class Database:
         tables = self.__client.execute(f'SELECT name FROM system.tables WHERE database == \'{self.name}\'')
         tables = map(lambda row: row[0], tables)
 
-        return {name: construct_table(name) for name in tables}
+        return [construct_table(name) for name in tables]
 
     def get_table(self, table_name):
         assert self.exist, f'Database {self.name} does not exist'
@@ -96,6 +99,10 @@ class Database:
         table.create()
 
         return table
+
+    def move_tables(self, tables):
+        for table in tables:
+            table.change_database(self.name)
 
     def drop(self):
         assert self.exist, f'Database {self.name} does not exist'

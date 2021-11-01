@@ -23,17 +23,21 @@ class DBOrdinaryToAtomicConverter:
         return f'{self.__atomic_prefix}{ordinary_name}'
 
     def __finished_previous_sessions(self, ordinary_database, atomic_database):
-        if atomic_database.exist and not ordinary_database.exist:
-            atomic_database.rename(ordinary_database.name)
+        if atomic_database.exist:
+            answer = self.__user_interactor.ask(
+                f'Changing for database {ordinary_database.name} failed in previous launch.\n'
+                 'Do you want to continue changing? (y/n)\n'
+            )
 
-            self.__user_interactor.notify(f'Changing continued after fail in previous launch and can\'t restore ordinary database, but atomic was restored')
-
-            return False
-        elif atomic_database.exist and ordinary_database.exist:
-            answer = self.__user_interactor.ask(f'Changing failed in previous launch. Do you want to continue changing? (y/n)')
             if answer == 'y':
-                pass #TODO
+                atomic_database.move_tables(ordinary_database.tables)
+                ordinary_database.drop()
+                atomic_database.rename(ordinary_database.name)
             elif answer == 'n':
+                if not ordinary_database.exist:
+                    ordinary_database.create()
+
+                ordinary_database.move_tables(atomic_database.tables)
                 atomic_database.drop()
             else:
                 self.__user_interactor.notify(f'Wrong answer, skipped')
@@ -56,7 +60,8 @@ class DBOrdinaryToAtomicConverter:
             atomic_database.create(engine = 'Atomic')
             tables = ordinary_database.tables
 
-            for table_name, table in tables.items():
+            for table in tables:
+                table_name = table.name
                 ordinary_table = ordinary_database.get_table(table_name)
                 atomic_table_name = f'{atomic_database.name}.{table_name}'
                 ordinary_table.rename(atomic_table_name)
