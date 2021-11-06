@@ -514,6 +514,18 @@ void Client::connect()
 {
     connection_parameters = ConnectionParameters(config());
 
+    if (config().has("connection-string"))
+    {
+        connection_string = config().getString("connection-string");
+        std::string delimiter = ":";
+        std::string host = connection_string.substr(0, connection_string.find(delimiter));
+        UInt16 port = std::stoi(connection_string.substr(connection_string.find(delimiter) + 1, connection_string.length()));
+        std::cout << "host: " << host << std::endl;
+        std::cout << "port: " << port << std::endl;
+        connection_parameters.host = host;
+        connection_parameters.port = port;
+    }
+
     if (is_interactive)
         std::cout << "Connecting to "
                     << (!connection_parameters.default_database.empty() ? "database " + connection_parameters.default_database + " at "
@@ -1148,6 +1160,8 @@ void Client::processOptions(const OptionsDescription & options_description,
         server_logs_file = options["server_logs_file"].as<std::string>();
     if (options.count("no-warnings"))
         config().setBool("no-warnings", true);
+    if (options.count("connection-string"))
+        config().setString("connection-string", options["connection-string"].as<std::string>());
 
     if ((query_fuzzer_runs = options["query-fuzzer-runs"].as<int>()))
     {

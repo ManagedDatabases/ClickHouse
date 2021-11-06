@@ -194,6 +194,7 @@ protected:
     String server_version;
     String prompt_by_server_display_name;
     String server_display_name;
+    String connection_string;
 
     ProgressIndication progress_indication;
     bool need_render_progress = true;
