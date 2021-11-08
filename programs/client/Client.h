@@ -30,6 +30,7 @@ protected:
     void processConfig() override;
 
     std::vector<String> hosts{};
+    std::vector<int> ports{};
 private:
     void printChangedSettings() const;
     std::vector<String> loadWarningMessages();
