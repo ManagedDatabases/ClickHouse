@@ -1036,10 +1036,22 @@ void Client::addAndCheckOptions(OptionsDescription & options_description, po::va
     /// Commandline options related to external tables.
 
     options_description.external_description.emplace(createOptionsDescription("External tables options", terminal_width));
-    options_description.external_description->add_options()("file", po::value<std::string>(), "data file or - for stdin")(
-        "name", po::value<std::string>()->default_value("_data"), "name of the table")(
-        "format", po::value<std::string>()->default_value("TabSeparated"), "data format")(
-        "structure", po::value<std::string>(), "structure")("types", po::value<std::string>(), "types");
+    options_description.external_description->add_options()
+    (
+        "file", po::value<std::string>(), "data file or - for stdin"
+    )
+    (
+        "name", po::value<std::string>()->default_value("_data"), "name of the table"
+    )
+    (
+        "format", po::value<std::string>()->default_value("TabSeparated"), "data format"
+    )
+    (
+        "structure", po::value<std::string>(), "structure"
+    )
+    (
+        "types", po::value<std::string>(), "types"
+    );
 
     cmd_settings.addProgramOptions(options_description.main_description.value());
     /// Parse main commandline options.
@@ -1051,10 +1063,9 @@ void Client::addAndCheckOptions(OptionsDescription & options_description, po::va
 }
 
 
-void Client::processOptions(
-    const OptionsDescription & options_description,
-    const CommandLineOptions & options,
-    const std::vector<Arguments> & external_tables_arguments)
+void Client::processOptions(const OptionsDescription & options_description,
+                            const CommandLineOptions & options,
+                            const std::vector<Arguments> & external_tables_arguments)
 {
     namespace po = boost::program_options;
 
@@ -1062,8 +1073,8 @@ void Client::processOptions(
     for (size_t i = 0; i < external_tables_arguments.size(); ++i)
     {
         /// Parse commandline options related to external tables.
-        po::parsed_options parsed_tables
-            = po::command_line_parser(external_tables_arguments[i]).options(options_description.external_description.value()).run();
+        po::parsed_options parsed_tables = po::command_line_parser(external_tables_arguments[i]).options(
+            options_description.external_description.value()).run();
         po::variables_map external_options;
         po::store(parsed_tables, external_options);
 
@@ -1210,8 +1221,7 @@ void Client::processConfig()
     if (global_context->getSettingsRef().max_insert_block_size.changed)
         insert_format_max_block_size = global_context->getSettingsRef().max_insert_block_size;
     else
-        insert_format_max_block_size
-            = config().getInt("insert_format_max_block_size", global_context->getSettingsRef().max_insert_block_size);
+        insert_format_max_block_size = config().getInt("insert_format_max_block_size", global_context->getSettingsRef().max_insert_block_size);
 
     ClientInfo & client_info = global_context->getClientInfo();
     client_info.setInitialQuery();
