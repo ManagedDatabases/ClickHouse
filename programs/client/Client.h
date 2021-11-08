@@ -2,8 +2,10 @@
 
 #include <Client/ClientBase.h>
 
+
 namespace DB
 {
+
 class Client : public ClientBase
 {
 public:
@@ -23,10 +25,8 @@ protected:
 
     void printHelpMessage(const OptionsDescription & options_description) override;
     void addAndCheckOptions(OptionsDescription & options_description, po::variables_map & options, Arguments & arguments) override;
-    void processOptions(
-        const OptionsDescription & options_description,
-        const CommandLineOptions & options,
-        const std::vector<Arguments> & external_tables_arguments) override;
+    void processOptions(const OptionsDescription & options_description, const CommandLineOptions & options,
+                        const std::vector<Arguments> & external_tables_arguments) override;
     void processConfig() override;
 
 private:
