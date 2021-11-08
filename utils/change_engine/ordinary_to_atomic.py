@@ -2,6 +2,7 @@
 from clickhouse_driver import Client
 from interface import Database
 import sys
+from enum import Enum
 
 
 class UserInteractor:
@@ -13,6 +14,13 @@ class UserInteractor:
         print(text)
 
 
+class Action(Enum):
+    CONTINUE = 1
+    REVERT = 2
+    CONVERT = 3
+    TERMINATE = 4
+
+
 class DBOrdinaryToAtomicConverter:
     def __init__(self):
         self.__atomic_prefix = '__temp_ordinary_to_atomic__'
@@ -22,54 +30,52 @@ class DBOrdinaryToAtomicConverter:
     def __get_atomic_name(self, ordinary_name):
         return f'{self.__atomic_prefix}{ordinary_name}'
 
-    def __finished_previous_sessions(self, ordinary_database, atomic_database):
-        if atomic_database.exists:
+    def __get_needed_action(self, ordinary_database, temp_database):
+        if temp_database.exists:
             answer = self.__user_interactor.ask(
                 f'Changing for database {ordinary_database.name} failed in previous launch.\n'
                  'Do you want to continue changing? (y/n)\n'
             )
 
             if answer == 'y':
-                atomic_database.move_tables(ordinary_database.tables)
-                ordinary_database.drop()
-                atomic_database.rename(ordinary_database.name)
+                return Action.CONTINUE
             elif answer == 'n':
-                if not ordinary_database.exists:
-                    ordinary_database.create()
-
-                ordinary_database.move_tables(atomic_database.tables)
-                atomic_database.drop()
+                return Action.REVERT
             else:
                 self.__user_interactor.notify(f'Wrong answer, skipped')
-
-            return False
+                return Action.TERMINATE
         else:
-            return True
+            return Action.CONVERT
 
     def convert(self, ordinary_name):
         ordinary_database = Database(ordinary_name, self.__client)
-        atomic_database = Database(self.__get_atomic_name(ordinary_name), self.__client)
+        temp_database = Database(self.__get_atomic_name(ordinary_name), self.__client)
 
-        if self.__finished_previous_sessions(ordinary_database, atomic_database):
+        action = self.__get_needed_action(ordinary_database, temp_database)
+
+        if action == Action.CONVERT or action == Action.CONTINUE:
             if not ordinary_database.exists:
                 raise ValueError(f'ordinary database \'{ordinary_database.name}\' does not exists')
 
             if ordinary_database.engine != 'Ordinary':
                 raise ValueError(f'database {ordinary_database.name} engine must be Ordinary')
 
-            atomic_database.create(engine = 'Atomic')
-            tables = ordinary_database.tables
+            if not temp_database.exists:
+                temp_database.create(engine = 'Atomic')
 
-            for table in tables:
-                table_name = table.name
-                ordinary_table = ordinary_database.get_table(table_name)
-                atomic_table_name = f'{atomic_database.name}.{table_name}'
-                ordinary_table.rename(atomic_table_name)
-
+            temp_database.move_tables(ordinary_database.tables)
             ordinary_database.drop()
-            atomic_database.rename(ordinary_name)
+            temp_database.rename(ordinary_name)
 
-            assert atomic_database.engine == 'Atomic', 'something went wrong'
+            assert temp_database.engine == 'Atomic', 'something went wrong'
+        elif action == Action.REVERT:
+            if not ordinary_database.exists:
+                ordinary_database.create()
+
+            ordinary_database.move_tables(temp_database.tables)
+            temp_database.drop()
+        elif action == Action.TERMINATE:
+            pass
 
 
 def main():

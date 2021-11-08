@@ -1,7 +1,7 @@
 class Table:
     def __init__(self, name, client):
         self.__fullname = name
-        self.__name, self.__database = self.__name.split('.')
+        self.__database, self.__name = name.split('.')
         self.__client = client
 
     @property
@@ -26,14 +26,15 @@ class Table:
 
         self.__client.execute(f'CREATE TABLE {self.fullname}')
 
-    def rename(self, new_name):
+    def rename_table(self, new_name):
         assert self.exists, f'Table {self.fullname} does not exists'
 
         self.__client.execute(f'RENAME TABLE {self.fullname} TO {new_name}')
-        self.__name = new_name
+        self.__fullname = new_name
+        self.__name, self.__database = self.__fullname.split('.')
 
-    def change_database(self, new_database):
-        self.rename(f'{new_database}.{self.name}')
+    def rename_database(self, new_database):
+        self.rename_table(f'{new_database}.{self.name}')
 
     def drop(self):
         assert self.exists, f'Table {self.fullname} does not exists'
@@ -71,8 +72,7 @@ class Database:
 
         return [self.__construct_table(name) for name in tables]
 
-    @staticmethod
-    def __construct_table(table_name):
+    def __construct_table(self, table_name):
         return Table(f'{self.name}.{table_name}', self.__client)
 
     def get_table(self, table_name):
@@ -104,7 +104,7 @@ class Database:
 
     def move_tables(self, tables):
         for table in tables:
-            table.change_database(self.name)
+            table.rename_database(self.name)
 
     def drop(self):
         assert self.exists, f'Database {self.name} does not exists'
