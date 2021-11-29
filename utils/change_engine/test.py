@@ -11,32 +11,33 @@ client = Client('localhost')
 
 def check_changing(tables, engine_from, engine_to):
     def wrapper(function, *args, **kwargs):
-        name = f'test_{random.randint(1, 100000)}'
+        def wrapped():
+            name = f'test_{random.randint(1, 100000)}'
 
-        client.execute(f'create database {name} engine={engine_from}')
+            client.execute(f'create database {name} engine={engine_from}')
 
-        database = Database(name, client)
+            database = Database(name, client)
 
-        for i in range(tables):
-            client.execute(
-                f'''
-                    CREATE TABLE {name}.table_{i}(　
-                        id UInt32,
-                        name String
-                    ) ENGINE = MergeTree ORDER BY (id, name);
-                '''
-                )
+            for i in range(tables):
+                client.execute(
+                    f'''
+                        CREATE TABLE {name}.table_{i}(　
+                            id UInt32,
+                            name String
+                        ) ENGINE = MergeTree ORDER BY (id, name);
+                    '''
+                    )
 
-        res = function(*args, database_name = name, **kwargs)
+            res = function(*args, database_name = name, **kwargs)
 
-        correct_engine = database.engine == engine_to 
-        correct_length = len(database.tables) == tables
+            correct_engine = database.engine == engine_to 
+            correct_length = len(database.tables) == tables
 
-        client.execute(f'drop database {name}')
+            client.execute(f'drop database {name}')
 
-        assert correct_engine and correct_length
-        return res
-
+            assert correct_engine and correct_length
+            return res
+        return wrapped
     return wrapper
 
 
