@@ -1,13 +1,22 @@
 #!/bin/python3
 from clickhouse_driver import Client
+from copy import deepcopy
+from enum import Enum
 from interface import Database
 import sys
-from enum import Enum
 
 
 class UserInteractor:
+    def __init__(self, default_answer=None):
+        self.__default_answer = default_answer
+
     def ask(self, text):
-        answer = input(text)
+        answer = None
+        if self.__default_answer is not None:
+            answer = self.__default_answer
+        else:
+            answer = input(text)
+
         return answer
 
     def notify(self, text): #TODO logging
@@ -22,10 +31,10 @@ class Action(Enum):
 
 
 class DBOrdinaryToAtomicConverter:
-    def __init__(self):
+    def __init__(self, user_interactor=UserInteractor()):
         self.__atomic_prefix = '__temp_ordinary_to_atomic__'
         self.__client = Client('localhost')
-        self.__user_interactor = UserInteractor()
+        self.__user_interactor = deepcopy(user_interactor)
 
     def __get_atomic_name(self, ordinary_name):
         return f'{self.__atomic_prefix}{ordinary_name}'
