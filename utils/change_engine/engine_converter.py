@@ -3,11 +3,20 @@ from clickhouse_driver import Client
 from interface import Database
 import sys
 from enum import Enum
+from copy import deepcopy
 
 
 class UserInteractor:
+    def __init__(self, default_answer=None):
+        self.__default_answer = default_answer
+
     def ask(self, text):
-        answer = input(text)
+        answer = None
+        if self.__default_answer is not None:
+            answer = self.__default_answer
+        else:
+            answer = input(text)
+
         return answer
 
     def notify(self, text): #TODO logging
@@ -22,10 +31,10 @@ class Action(Enum):
 
 
 class DBEngineConverter:
-    def __init__(self):
+    def __init__(self, user_interactor=UserInteractor()):
         self.__temporary_prefix = None
         self.__client = Client('localhost')
-        self.__user_interactor = UserInteractor()
+        self.__user_interactor = deepcopy(user_interactor)
 
     def __get_temporary_name(self, database_name):
         assert self.__temporary_prefix is not None
@@ -78,7 +87,7 @@ class DBEngineConverter:
 
             assert database.engine == engine_to, 'something went wrong'
         elif action == Action.REVERT:
-            if not ordinary_database.exists:
+            if not database.exists:
                 database.create(engine=engine_from)
 
             database.move_tables(temp_database.tables)
