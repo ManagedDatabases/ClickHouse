@@ -9,7 +9,6 @@
 #include <base/sort.h>
 #include <base/scope_guard.h>
 
-
 #include <IO/WriteHelpers.h>
 
 #include <Columns/ColumnsCommon.h>
@@ -31,12 +30,6 @@ namespace ErrorCodes
     extern const int NOT_IMPLEMENTED;
     extern const int LOGICAL_ERROR;
 }
-
-template class DecimalPaddedPODArray<Decimal32>;
-template class DecimalPaddedPODArray<Decimal64>;
-template class DecimalPaddedPODArray<Decimal128>;
-template class DecimalPaddedPODArray<Decimal256>;
-template class DecimalPaddedPODArray<DateTime64>;
 
 template <is_decimal T>
 int ColumnDecimal<T>::compareAt(size_t n, size_t m, const IColumn & rhs_, int) const
@@ -131,19 +124,6 @@ void ColumnDecimal<T>::updateHashFast(SipHash & hash) const
 template <is_decimal T>
 void ColumnDecimal<T>::getPermutation(bool reverse, size_t limit, int , IColumn::Permutation & res) const
 {
-#if 1 /// TODO: perf test
-    if (data.size() <= std::numeric_limits<UInt32>::max())
-    {
-        PaddedPODArray<UInt32> tmp_res;
-        permutation(reverse, limit, tmp_res);
-
-        res.resize(tmp_res.size());
-        for (size_t i = 0; i < tmp_res.size(); ++i)
-            res[i] = tmp_res[i];
-        return;
-    }
-#endif
-
     permutation(reverse, limit, res);
 }
 
@@ -151,7 +131,7 @@ template <is_decimal T>
 void ColumnDecimal<T>::updatePermutation(bool reverse, size_t limit, int, IColumn::Permutation & res, EqualRanges & equal_ranges) const
 {
     auto equals = [this](size_t lhs, size_t rhs) { return data[lhs] == data[rhs]; };
-    auto sort = [](auto begin, auto end, auto pred) { std::sort(begin, end, pred); };
+    auto sort = [](auto begin, auto end, auto pred) { ::sort(begin, end, pred); };
     auto partial_sort = [](auto begin, auto mid, auto end, auto pred) { ::partial_sort(begin, mid, end, pred); };
 
     if (reverse)
@@ -237,6 +217,40 @@ ColumnPtr ColumnDecimal<T>::filter(const IColumn::Filter & filt, ssize_t result_
     const UInt8 * filt_end = filt_pos + size;
     const T * data_pos = data.data();
 
+    /** A slightly more optimized version.
+    * Based on the assumption that often pieces of consecutive values
+    *  completely pass or do not pass the filter.
+    * Therefore, we will optimistically check the parts of `SIMD_BYTES` values.
+    */
+    static constexpr size_t SIMD_BYTES = 64;
+    const UInt8 * filt_end_aligned = filt_pos + size / SIMD_BYTES * SIMD_BYTES;
+
+    while (filt_pos < filt_end_aligned)
+    {
+        UInt64 mask = bytes64MaskToBits64Mask(filt_pos);
+
+        if (0xffffffffffffffff == mask)
+        {
+            res_data.insert(data_pos, data_pos + SIMD_BYTES);
+        }
+        else
+        {
+            while (mask)
+            {
+                size_t index = __builtin_ctzll(mask);
+                res_data.push_back(data_pos[index]);
+            #ifdef __BMI__
+                mask = _blsr_u64(mask);
+            #else
+                mask = mask & (mask-1);
+            #endif
+            }
+        }
+
+        filt_pos += SIMD_BYTES;
+        data_pos += SIMD_BYTES;
+    }
+
     while (filt_pos < filt_end)
     {
         if (*filt_pos)
@@ -297,7 +311,8 @@ void ColumnDecimal<T>::gather(ColumnGathererStream & gatherer)
 template <is_decimal T>
 ColumnPtr ColumnDecimal<T>::compress() const
 {
-    size_t source_size = data.size() * sizeof(T);
+    const size_t data_size = data.size();
+    const size_t source_size = data_size * sizeof(T);
 
     /// Don't compress small blocks.
     if (source_size < 4096) /// A wild guess.
@@ -308,8 +323,9 @@ ColumnPtr ColumnDecimal<T>::compress() const
     if (!compressed)
         return ColumnCompressed::wrap(this->getPtr());
 
-    return ColumnCompressed::create(data.size(), compressed->size(),
-        [compressed = std::move(compressed), column_size = data.size(), scale = this->scale]
+    const size_t compressed_size = compressed->size();
+    return ColumnCompressed::create(data_size, compressed_size,
+        [compressed = std::move(compressed), column_size = data_size, scale = this->scale]
         {
             auto res = ColumnDecimal<T>::create(column_size, scale);
             ColumnCompressed::decompressBuffer(

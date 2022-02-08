@@ -12,7 +12,11 @@ dpkg -i package_folder/clickhouse-common-static_*.deb
 dpkg -i package_folder/clickhouse-common-static-dbg_*.deb
 dpkg -i package_folder/clickhouse-server_*.deb
 dpkg -i package_folder/clickhouse-client_*.deb
-dpkg -i package_folder/clickhouse-test_*.deb
+if [[ -n "$TEST_CASES_FROM_DEB" ]] && [[ "$TEST_CASES_FROM_DEB" -eq 1 ]]; then
+    dpkg -i package_folder/clickhouse-test_*.deb
+else
+    ln -s /usr/share/clickhouse-test/clickhouse-test /usr/bin/clickhouse-test
+fi
 
 # install test configs
 /usr/share/clickhouse-test/config/install.sh
@@ -96,8 +100,15 @@ function run_tests()
         ADDITIONAL_OPTIONS+=('8')
     fi
 
+    if [[ -n "$RUN_BY_HASH_NUM" ]] && [[ -n "$RUN_BY_HASH_TOTAL" ]]; then
+        ADDITIONAL_OPTIONS+=('--run-by-hash-num')
+        ADDITIONAL_OPTIONS+=("$RUN_BY_HASH_NUM")
+        ADDITIONAL_OPTIONS+=('--run-by-hash-total')
+        ADDITIONAL_OPTIONS+=("$RUN_BY_HASH_TOTAL")
+    fi
+
     set +e
-    clickhouse-test --testname --shard --zookeeper --hung-check --print-time \
+    clickhouse-test --testname --shard --zookeeper --check-zookeeper-session --hung-check --print-time \
             --test-runs "$NUM_TRIES" "${ADDITIONAL_OPTIONS[@]}" 2>&1 \
         | ts '%Y-%m-%d %H:%M:%S' \
         | tee -a test_output/test_result.txt
@@ -108,7 +119,12 @@ export -f run_tests
 
 timeout "$MAX_RUN_TIME" bash -c run_tests ||:
 
-./process_functional_tests_result.py || echo -e "failure\tCannot parse results" > /test_output/check_status.tsv
+echo "Files in current directory"
+ls -la ./
+echo "Files in root directory"
+ls -la /
+
+/process_functional_tests_result.py || echo -e "failure\tCannot parse results" > /test_output/check_status.tsv
 
 clickhouse-client -q "system flush logs" ||:
 
@@ -135,21 +151,31 @@ done
 
 wait ||:
 
+# Compressed (FIXME: remove once only github actions will be left)
+rm /var/log/clickhouse-server/clickhouse-server.log
 mv /var/log/clickhouse-server/stderr.log /test_output/ ||:
 if [[ -n "$WITH_COVERAGE" ]] && [[ "$WITH_COVERAGE" -eq 1 ]]; then
     tar -chf /test_output/clickhouse_coverage.tar.gz /profraw ||:
 fi
-tar -chf /test_output/text_log_dump.tar /var/lib/clickhouse/data/system/text_log ||:
-tar -chf /test_output/query_log_dump.tar /var/lib/clickhouse/data/system/query_log ||:
-tar -chf /test_output/zookeeper_log_dump.tar /var/lib/clickhouse/data/system/zookeeper_log ||:
-tar -chf /test_output/trace_log_dump.tar /var/lib/clickhouse/data/system/trace_log ||:
+
 tar -chf /test_output/coordination.tar /var/lib/clickhouse/coordination ||:
+
+# Replace the engine with Ordinary to avoid extra symlinks stuff in artifacts.
+# (so that clickhouse-local --path can read it w/o extra care).
+sed -i -e "s/ATTACH DATABASE _ UUID '[^']*'/ATTACH DATABASE system/" -e "s/Atomic/Ordinary/" /var/lib/clickhouse/metadata/system.sql
+for table in text_log query_log zookeeper_log trace_log; do
+    sed -i "s/ATTACH TABLE _ UUID '[^']*'/ATTACH TABLE $table/" /var/lib/clickhouse/metadata/system/${table}.sql
+    tar -chf /test_output/${table}_dump.tar /var/lib/clickhouse/metadata/system.sql /var/lib/clickhouse/metadata/system/${table}.sql /var/lib/clickhouse/data/system/${table} ||:
+done
 
 if [[ -n "$USE_DATABASE_REPLICATED" ]] && [[ "$USE_DATABASE_REPLICATED" -eq 1 ]]; then
     grep -Fa "Fatal" /var/log/clickhouse-server/clickhouse-server1.log ||:
     grep -Fa "Fatal" /var/log/clickhouse-server/clickhouse-server2.log ||:
     pigz < /var/log/clickhouse-server/clickhouse-server1.log > /test_output/clickhouse-server1.log.gz ||:
     pigz < /var/log/clickhouse-server/clickhouse-server2.log > /test_output/clickhouse-server2.log.gz ||:
+    # FIXME: remove once only github actions will be left
+    rm /var/log/clickhouse-server/clickhouse-server1.log
+    rm /var/log/clickhouse-server/clickhouse-server2.log
     mv /var/log/clickhouse-server/stderr1.log /test_output/ ||:
     mv /var/log/clickhouse-server/stderr2.log /test_output/ ||:
     tar -chf /test_output/zookeeper_log_dump1.tar /var/lib/clickhouse1/data/system/zookeeper_log ||:

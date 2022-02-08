@@ -1,43 +1,42 @@
 #pragma once
 
+#include <pdqsort.h>
+
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wold-style-cast"
 
-#if !defined(ARCADIA_BUILD)
-#    include <miniselect/floyd_rivest_select.h>  // Y_IGNORE
-#else
-#    include <algorithm>
-#endif
+#include <miniselect/floyd_rivest_select.h>
 
-template <class RandomIt>
+template <typename RandomIt>
 void nth_element(RandomIt first, RandomIt nth, RandomIt last)
 {
-#if !defined(ARCADIA_BUILD)
     ::miniselect::floyd_rivest_select(first, nth, last);
-#else
-    ::std::nth_element(first, nth, last);
-#endif
 }
 
-template <class RandomIt>
+template <typename RandomIt>
 void partial_sort(RandomIt first, RandomIt middle, RandomIt last)
 {
-#if !defined(ARCADIA_BUILD)
     ::miniselect::floyd_rivest_partial_sort(first, middle, last);
-#else
-    ::std::partial_sort(first, middle, last);
-#endif
 }
 
-template <class RandomIt, class Compare>
+template <typename RandomIt, typename Compare>
 void partial_sort(RandomIt first, RandomIt middle, RandomIt last, Compare compare)
 {
-#if !defined(ARCADIA_BUILD)
     ::miniselect::floyd_rivest_partial_sort(first, middle, last, compare);
-#else
-    ::std::partial_sort(first, middle, last, compare);
-#endif
+}
 
 #pragma GCC diagnostic pop
 
+template <typename RandomIt, typename Compare>
+void sort(RandomIt first, RandomIt last, Compare compare)
+{
+    ::pdqsort(first, last, compare);
+}
+
+template <typename RandomIt>
+void sort(RandomIt first, RandomIt last)
+{
+    using value_type = typename std::iterator_traits<RandomIt>::value_type;
+    using comparator = std::less<value_type>;
+    ::pdqsort(first, last, comparator());
 }

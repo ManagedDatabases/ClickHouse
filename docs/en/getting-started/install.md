@@ -27,10 +27,9 @@ It is recommended to use official pre-compiled `deb` packages for Debian or Ubun
 {% include 'install/deb.sh' %}
 ```
 
-You can replace `stable` with `lts` or `testing` to use different [“release trains”](../faq/operations/production.md) based on your needs.
+You can replace `stable` with `lts` or `testing` to use different [release trains](../faq/operations/production.md) based on your needs.
 
 You can also download and install packages manually from [here](https://repo.clickhouse.com/deb/stable/main/).
-
 
 #### Packages {#packages}
 
@@ -144,6 +143,12 @@ On Gentoo, you can just use `emerge clickhouse` to install ClickHouse from sourc
 To start the server as a daemon, run:
 
 ``` bash
+$ sudo clickhouse start
+```
+
+There are also another ways to run ClickHouse:
+
+``` bash
 $ sudo service clickhouse-server start
 ```
 
@@ -151,6 +156,12 @@ If you do not have `service` command, run as
 
 ``` bash
 $ sudo /etc/init.d/clickhouse-server start
+```
+
+If you have `systemctl` command, run as
+
+``` bash
+$ sudo systemctl start clickhouse-server.service
 ```
 
 See the logs in the `/var/log/clickhouse-server/` directory.

@@ -1,16 +1,14 @@
 #include "LocalServer.h"
 
 #include <Poco/Util/XMLConfiguration.h>
-#include <Poco/Util/HelpFormatter.h>
-#include <Poco/Util/OptionCallback.h>
 #include <Poco/String.h>
 #include <Poco/Logger.h>
 #include <Poco/NullChannel.h>
+#include <Poco/SimpleFileChannel.h>
 #include <Databases/DatabaseMemory.h>
 #include <Storages/System/attachSystemTables.h>
 #include <Storages/System/attachInformationSchemaTables.h>
 #include <Interpreters/ProcessList.h>
-#include <Interpreters/executeQuery.h>
 #include <Interpreters/loadMetadata.h>
 #include <Interpreters/DatabaseCatalog.h>
 #include <base/getFQDNOrHostName.h>
@@ -20,19 +18,17 @@
 #include <Common/Exception.h>
 #include <Common/Macros.h>
 #include <Common/Config/ConfigProcessor.h>
-#include <Common/escapeForFileName.h>
-#include <Common/ClickHouseRevision.h>
 #include <Common/ThreadStatus.h>
-#include <Common/UnicodeBar.h>
-#include <Common/config_version.h>
+#include <Common/TLDListsHolder.h>
 #include <Common/quoteString.h>
+#include <Common/randomSeed.h>
 #include <loggers/Loggers.h>
 #include <IO/ReadBufferFromFile.h>
 #include <IO/ReadBufferFromString.h>
 #include <IO/WriteBufferFromFileDescriptor.h>
-#include <IO/ReadHelpers.h>
 #include <IO/UseSSL.h>
 #include <Parsers/IAST.h>
+#include <Parsers/ASTInsertQuery.h>
 #include <base/ErrorHandlers.h>
 #include <Functions/registerFunctions.h>
 #include <AggregateFunctions/registerAggregateFunctions.h>
@@ -41,12 +37,15 @@
 #include <Dictionaries/registerDictionaries.h>
 #include <Disks/registerDisks.h>
 #include <Formats/registerFormats.h>
+#include <Formats/FormatFactory.h>
+#include <boost/algorithm/string/replace.hpp>
 #include <boost/program_options/options_description.hpp>
-#include <boost/program_options.hpp>
 #include <base/argsToConfig.h>
-#include <Common/TerminalSize.h>
-#include <Common/randomSeed.h>
 #include <filesystem>
+
+#if defined(FUZZING_MODE)
+    #include <Functions/getFuzzerData.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -72,7 +71,6 @@ void LocalServer::processError(const String &) const
         String message;
         if (server_exception)
         {
-            bool print_stack_trace = config().getBool("stacktrace", false);
             message = getExceptionMessage(*server_exception, print_stack_trace, true);
         }
         else if (client_exception)
@@ -141,9 +139,12 @@ bool LocalServer::executeMultiQuery(const String & all_queries_text)
                 }
                 catch (...)
                 {
+                    if (!is_interactive && !ignore_error)
+                        throw;
+
                     // Surprisingly, this is a client error. A server error would
                     // have been reported w/o throwing (see onReceiveSeverException()).
-                    client_exception = std::make_unique<Exception>(getCurrentExceptionMessage(true), getCurrentExceptionCode());
+                    client_exception = std::make_unique<Exception>(getCurrentExceptionMessage(print_stack_trace), getCurrentExceptionCode());
                     have_error = true;
                 }
 
@@ -187,25 +188,7 @@ void LocalServer::initialize(Poco::Util::Application & self)
         ConfigProcessor config_processor(config_path, false, true);
         config_processor.setConfigPath(fs::path(config_path).parent_path());
         auto loaded_config = config_processor.loadConfig();
-        config_processor.savePreprocessedConfig(loaded_config, loaded_config.configuration->getString("path", "."));
         config().add(loaded_config.configuration.duplicate(), PRIO_DEFAULT, false);
-    }
-
-    if (config().has("logger.console") || config().has("logger.level") || config().has("logger.log"))
-    {
-        // force enable logging
-        config().setString("logger", "logger");
-        // sensitive data rules are not used here
-        buildLoggers(config(), logger(), "clickhouse-local");
-    }
-    else
-    {
-        // Turn off server logging to stderr
-        if (!config().has("verbose"))
-        {
-            Poco::Logger::root().setLevel("none");
-            Poco::Logger::root().setChannel(Poco::AutoPtr<Poco::NullChannel>(new Poco::NullChannel()));
-        }
     }
 }
 
@@ -292,54 +275,77 @@ void LocalServer::tryInitPath()
     global_context->setFlagsPath(path + "flags");
 
     global_context->setUserFilesPath(""); // user's files are everywhere
+
+    /// top_level_domains_lists
+    const std::string & top_level_domains_path = config().getString("top_level_domains_path", path + "top_level_domains/");
+    if (!top_level_domains_path.empty())
+        TLDListsHolder::getInstance().parseConfig(fs::path(top_level_domains_path) / "", config());
 }
 
 
 void LocalServer::cleanup()
 {
-    connection.reset();
-
-    if (global_context)
+    try
     {
-        global_context->shutdown();
-        global_context.reset();
+        connection.reset();
+
+        if (global_context)
+        {
+            global_context->shutdown();
+            global_context.reset();
+        }
+
+        status.reset();
+
+        // Delete the temporary directory if needed.
+        if (temporary_directory_to_delete)
+        {
+            const auto dir = *temporary_directory_to_delete;
+            temporary_directory_to_delete.reset();
+            LOG_DEBUG(&logger(), "Removing temporary directory: {}", dir.string());
+            remove_all(dir);
+        }
     }
-
-    status.reset();
-
-    // Delete the temporary directory if needed.
-    if (temporary_directory_to_delete)
+    catch (...)
     {
-        const auto dir = *temporary_directory_to_delete;
-        temporary_directory_to_delete.reset();
-        LOG_DEBUG(&logger(), "Removing temporary directory: {}", dir.string());
-        remove_all(dir);
+        tryLogCurrentException(__PRETTY_FUNCTION__);
     }
 }
 
 
 std::string LocalServer::getInitialCreateTableQuery()
 {
-    if (!config().has("table-structure"))
+    if (!config().has("table-structure") && !config().has("table-file") && !config().has("table-data-format"))
         return {};
 
     auto table_name = backQuoteIfNeed(config().getString("table-name", "table"));
-    auto table_structure = config().getString("table-structure");
-    auto data_format = backQuoteIfNeed(config().getString("table-data-format", "TSV"));
+    auto table_structure = config().getString("table-structure", "auto");
 
     String table_file;
+    String format_from_file_name;
     if (!config().has("table-file") || config().getString("table-file") == "-")
     {
         /// Use Unix tools stdin naming convention
         table_file = "stdin";
+        format_from_file_name = FormatFactory::instance().getFormatFromFileDescriptor(STDIN_FILENO);
     }
     else
     {
         /// Use regular file
-        table_file = quoteString(config().getString("table-file"));
+        auto file_name = config().getString("table-file");
+        table_file = quoteString(file_name);
+        format_from_file_name = FormatFactory::instance().getFormatFromFileName(file_name, false);
     }
 
-    return fmt::format("CREATE TABLE {} ({}) ENGINE = File({}, {});",
+    auto data_format
+        = backQuoteIfNeed(config().getString("table-data-format", format_from_file_name.empty() ? "TSV" : format_from_file_name));
+
+    if (table_structure == "auto")
+        table_structure = "";
+    else
+        table_structure = "(" + table_structure + ")";
+
+    return fmt::format("CREATE TABLE {} {} ENGINE = File({}, {});",
                        table_name, table_structure, data_format, table_file);
 }
 
@@ -355,7 +361,7 @@ static ConfigurationPtr getConfigurationFromXMLString(const char * xml_data)
 void LocalServer::setupUsers()
 {
     static const char * minimal_default_user_xml =
-        "<yandex>"
+        "<clickhouse>"
         "    <profiles>"
         "        <default></default>"
         "    </profiles>"
@@ -372,7 +378,7 @@ void LocalServer::setupUsers()
         "    <quotas>"
         "        <default></default>"
         "    </quotas>"
-        "</yandex>";
+        "</clickhouse>";
 
     ConfigurationPtr users_config;
 
@@ -381,7 +387,6 @@ void LocalServer::setupUsers()
         const auto users_config_path = config().getString("users_config", config().getString("config-file", "config.xml"));
         ConfigProcessor config_processor(users_config_path);
         const auto loaded_config = config_processor.loadConfig();
-        config_processor.savePreprocessedConfig(loaded_config, config().getString("path", DBMS_DEFAULT_PATH));
         users_config = loaded_config.configuration;
     }
     else
@@ -393,12 +398,6 @@ void LocalServer::setupUsers()
         global_context->setUsersConfig(users_config);
     else
         throw Exception("Can't load config for users", ErrorCodes::CANNOT_LOAD_CONFIG);
-}
-
-
-String LocalServer::getQueryTextPrefix()
-{
-    return getInitialCreateTableQuery();
 }
 
 
@@ -419,7 +418,25 @@ try
     std::cout << std::fixed << std::setprecision(3);
     std::cerr << std::fixed << std::setprecision(3);
 
-    is_interactive = stdin_is_a_tty && !config().has("query") && !config().has("table-structure") && queries_files.empty();
+#if defined(FUZZING_MODE)
+    static bool first_time = true;
+    if (first_time)
+    {
+
+    if (queries_files.empty() && !config().has("query"))
+    {
+        std::cerr << "\033[31m" << "ClickHouse compiled in fuzzing mode." << "\033[0m" << std::endl;
+        std::cerr << "\033[31m" << "You have to provide a query with --query or --queries-file option." << "\033[0m" << std::endl;
+        std::cerr << "\033[31m" << "The query have to use function getFuzzerData() inside." << "\033[0m" << std::endl;
+        exit(1);
+    }
+
+    is_interactive = false;
+#else
+    is_interactive = stdin_is_a_tty
+        && (config().hasOption("interactive")
+            || (!config().has("query") && !config().has("table-structure") && queries_files.empty() && !config().has("table-file")));
+#endif
     if (!is_interactive)
     {
         /// We will terminate process on error
@@ -438,47 +455,63 @@ try
 
     processConfig();
     applyCmdSettings(global_context);
-    connect();
 
     if (is_interactive)
     {
         clearTerminal();
         showClientVersion();
         std::cerr << std::endl;
+    }
 
+    connect();
+
+#ifdef FUZZING_MODE
+    first_time = false;
+    }
+#endif
+
+    String initial_query = getInitialCreateTableQuery();
+    if (!initial_query.empty())
+        processQueryText(initial_query);
+
+    if (is_interactive && !delayed_interactive)
+    {
         runInteractive();
     }
     else
     {
         runNonInteractive();
+
+        if (delayed_interactive)
+            runInteractive();
     }
 
+#ifndef FUZZING_MODE
     cleanup();
+#endif
     return Application::EXIT_OK;
+}
+catch (const DB::Exception & e)
+{
+    cleanup();
+
+    bool need_print_stack_trace = config().getBool("stacktrace", false);
+    std::cerr << getExceptionMessage(e, need_print_stack_trace, true) << std::endl;
+    return e.code() ? e.code() : -1;
 }
 catch (...)
 {
-    try
-    {
-        cleanup();
-    }
-    catch (...)
-    {
-        tryLogCurrentException(__PRETTY_FUNCTION__);
-    }
+    cleanup();
 
-    if (!ignore_error)
-        std::cerr << getCurrentExceptionMessage(config().hasOption("stacktrace")) << '\n';
-
-    auto code = getCurrentExceptionCode();
-    /// If exception code isn't zero, we should return non-zero return code anyway.
-    return code ? code : -1;
+    std::cerr << getCurrentExceptionMessage(false) << std::endl;
+    return getCurrentExceptionCode();
 }
 
 
 void LocalServer::processConfig()
 {
-    if (is_interactive)
+    delayed_interactive = config().has("interactive") && (config().has("query") || config().has("queries-file"));
+    if (is_interactive && !delayed_interactive)
     {
         if (config().has("query") && config().has("queries-file"))
             throw Exception("Specify either `query` or `queries-file` option", ErrorCodes::BAD_ARGUMENTS);
@@ -490,10 +523,45 @@ void LocalServer::processConfig()
     }
     else
     {
+        if (delayed_interactive)
+        {
+            load_suggestions = true;
+        }
+
         need_render_progress = config().getBool("progress", false);
         echo_queries = config().hasOption("echo") || config().hasOption("verbose");
         ignore_error = config().getBool("ignore-error", false);
         is_multiquery = true;
+    }
+    print_stack_trace = config().getBool("stacktrace", false);
+
+    auto logging = (config().has("logger.console")
+                    || config().has("logger.level")
+                    || config().has("log-level")
+                    || config().has("logger.log"));
+
+    auto file_logging = config().has("server_logs_file");
+    if (is_interactive && logging && !file_logging)
+        throw Exception("For interactive mode logging is allowed only with --server_logs_file option",
+                        ErrorCodes::BAD_ARGUMENTS);
+
+    if (file_logging)
+    {
+        auto level = Poco::Logger::parseLevel(config().getString("log-level", "trace"));
+        Poco::Logger::root().setLevel(level);
+        Poco::Logger::root().setChannel(Poco::AutoPtr<Poco::SimpleFileChannel>(new Poco::SimpleFileChannel(server_logs_file)));
+    }
+    else if (logging)
+    {
+        // force enable logging
+        config().setString("logger", "logger");
+        // sensitive data rules are not used here
+        buildLoggers(config(), logger(), "clickhouse-local");
+    }
+    else
+    {
+        Poco::Logger::root().setLevel("none");
+        Poco::Logger::root().setChannel(Poco::AutoPtr<Poco::NullChannel>(new Poco::NullChannel()));
     }
 
     shared_context = Context::createShared();
@@ -512,18 +580,15 @@ void LocalServer::processConfig()
 
     format = config().getString("output-format", config().getString("format", is_interactive ? "PrettyCompact" : "TSV"));
     insert_format = "Values";
+
     /// Setting value from cmd arg overrides one from config
     if (global_context->getSettingsRef().max_insert_block_size.changed)
         insert_format_max_block_size = global_context->getSettingsRef().max_insert_block_size;
     else
         insert_format_max_block_size = config().getInt("insert_format_max_block_size", global_context->getSettingsRef().max_insert_block_size);
 
-    /// Skip networking
-
     /// Sets external authenticators config (LDAP, Kerberos).
     global_context->setExternalAuthenticatorsConfig(config());
-
-    global_context->initializeBackgroundExecutors();
 
     setupUsers();
 
@@ -595,7 +660,7 @@ void LocalServer::processConfig()
         fs::create_directories(fs::path(path) / "metadata/");
 
         loadMetadataSystem(global_context);
-        attachSystemTablesLocal(*createMemoryDatabaseIfNotExists(global_context, DatabaseCatalog::SYSTEM_DATABASE));
+        attachSystemTablesLocal(global_context, *createMemoryDatabaseIfNotExists(global_context, DatabaseCatalog::SYSTEM_DATABASE));
         attachInformationSchema(global_context, *createMemoryDatabaseIfNotExists(global_context, DatabaseCatalog::INFORMATION_SCHEMA));
         attachInformationSchema(global_context, *createMemoryDatabaseIfNotExists(global_context, DatabaseCatalog::INFORMATION_SCHEMA_UPPERCASE));
         loadMetadata(global_context);
@@ -606,7 +671,7 @@ void LocalServer::processConfig()
     }
     else if (!config().has("no-system-tables"))
     {
-        attachSystemTablesLocal(*createMemoryDatabaseIfNotExists(global_context, DatabaseCatalog::SYSTEM_DATABASE));
+        attachSystemTablesLocal(global_context, *createMemoryDatabaseIfNotExists(global_context, DatabaseCatalog::SYSTEM_DATABASE));
         attachInformationSchema(global_context, *createMemoryDatabaseIfNotExists(global_context, DatabaseCatalog::INFORMATION_SCHEMA));
         attachInformationSchema(global_context, *createMemoryDatabaseIfNotExists(global_context, DatabaseCatalog::INFORMATION_SCHEMA_UPPERCASE));
     }
@@ -625,7 +690,7 @@ void LocalServer::processConfig()
 }
 
 
-static std::string getHelpHeader()
+[[ maybe_unused ]] static std::string getHelpHeader()
 {
     return
         "usage: clickhouse-local [initial table definition] [--query <query>]\n"
@@ -641,7 +706,7 @@ static std::string getHelpHeader()
 }
 
 
-static std::string getHelpFooter()
+[[ maybe_unused ]] static std::string getHelpFooter()
 {
     return
         "Example printing memory used by each Unix user:\n"
@@ -652,18 +717,29 @@ static std::string getHelpFooter()
 }
 
 
-void LocalServer::printHelpMessage(const OptionsDescription & options_description)
+void LocalServer::printHelpMessage([[maybe_unused]] const OptionsDescription & options_description)
 {
+#if defined(FUZZING_MODE)
+    std::cout <<
+        "usage: clickhouse <clickhouse-local arguments> -- <libfuzzer arguments>\n"
+        "Note: It is important not to use only one letter keys with single dash for \n"
+        "for clickhouse-local arguments. It may work incorrectly.\n"
+
+        "ClickHouse is build with coverage guided fuzzer (libfuzzer) inside it.\n"
+        "You have to provide a query which contains getFuzzerData function.\n"
+        "This will take the data from fuzzing engine, pass it to getFuzzerData function and execute a query.\n"
+        "Each time the data will be different, and it will last until some segfault or sanitizer assertion is found. \n";
+#else
     std::cout << getHelpHeader() << "\n";
     std::cout << options_description.main_description.value() << "\n";
     std::cout << getHelpFooter() << "\n";
+#endif
 }
 
 
-void LocalServer::addAndCheckOptions(OptionsDescription & options_description, po::variables_map & options, Arguments & arguments)
+void LocalServer::addOptions(OptionsDescription & options_description)
 {
     options_description.main_description->add_options()
-        ("database,d", po::value<std::string>(), "database")
         ("table,N", po::value<std::string>(), "name of the initial table")
 
         /// If structure argument is omitted then initial query is not generated
@@ -678,11 +754,9 @@ void LocalServer::addAndCheckOptions(OptionsDescription & options_description, p
         ("logger.level", po::value<std::string>(), "Log level")
 
         ("no-system-tables", "do not attach system tables (better startup time)")
+        ("path", po::value<std::string>(), "Storage path")
+        ("top_level_domains_path", po::value<std::string>(), "Path to lists with custom TLDs")
         ;
-
-    cmd_settings.addProgramOptions(options_description.main_description.value());
-    po::parsed_options parsed = po::command_line_parser(arguments).options(options_description.main_description.value()).run();
-    po::store(parsed, options);
 }
 
 
@@ -731,11 +805,22 @@ void LocalServer::processOptions(const OptionsDescription &, const CommandLineOp
 
 int mainEntryClickHouseLocal(int argc, char ** argv)
 {
-    DB::LocalServer app;
     try
     {
+        DB::LocalServer app;
         app.init(argc, argv);
         return app.run();
+    }
+    catch (const DB::Exception & e)
+    {
+        std::cerr << DB::getExceptionMessage(e, false) << std::endl;
+        auto code = DB::getCurrentExceptionCode();
+        return code ? code : 1;
+    }
+    catch (const boost::program_options::error & e)
+    {
+        std::cerr << "Bad arguments: " << e.what() << std::endl;
+        return DB::ErrorCodes::BAD_ARGUMENTS;
     }
     catch (...)
     {
@@ -744,3 +829,51 @@ int mainEntryClickHouseLocal(int argc, char ** argv)
         return code ? code : 1;
     }
 }
+
+#if defined(FUZZING_MODE)
+
+std::optional<DB::LocalServer> fuzz_app;
+
+extern "C" int LLVMFuzzerInitialize(int * pargc, char *** pargv)
+{
+    int & argc = *pargc;
+    char ** argv = *pargv;
+
+    /// As a user you can add flags to clickhouse binary in fuzzing mode as follows
+    /// clickhouse <set of clickhouse-local specific flag> -- <set of libfuzzer flags>
+
+    /// Calculate the position of delimiter "--" that separates arguments
+    /// of clickhouse-local and libfuzzer
+    int pos_delim = argc;
+    for (int i = 0; i < argc; ++i)
+    {
+        if (strcmp(argv[i], "--") == 0)
+        {
+            pos_delim = i;
+            break;
+        }
+    }
+
+    /// Initialize clickhouse-local app
+    fuzz_app.emplace();
+    fuzz_app->init(pos_delim, argv);
+
+    /// We will leave clickhouse-local specific arguments as is, because libfuzzer will ignore
+    /// all keys starting with --
+    return 0;
+}
+
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t * data, size_t size)
+try
+{
+    auto input = String(reinterpret_cast<const char *>(data), size);
+    DB::FunctionGetFuzzerData::update(input);
+    fuzz_app->run();
+    return 0;
+}
+catch (...)
+{
+    return 1;
+}
+#endif

@@ -43,8 +43,6 @@ namespace ErrorCodes
     extern const int UNKNOWN_AGGREGATED_DATA_VARIANT;
 }
 
-class IBlockOutputStream;
-
 /** Different data structures that can be used for aggregation
   * For efficiency, the aggregation data itself is put into the pool.
   * Data and pool ownership (states of aggregate functions)
@@ -1064,6 +1062,7 @@ private:
         const IAggregateFunction * batch_that{};
         const IColumn ** batch_arguments{};
         const UInt64 * offsets{};
+        bool has_sparse_arguments = false;
     };
 
     using AggregateFunctionInstructions = std::vector<AggregateFunctionInstruction>;
@@ -1319,6 +1318,8 @@ private:
         AggregatedDataVariants & data_variants,
         Columns & key_columns, size_t key_row,
         MutableColumns & final_key_columns) const;
+
+    static bool hasSparseArguments(AggregateFunctionInstruction * aggregate_instructions);
 };
 
 

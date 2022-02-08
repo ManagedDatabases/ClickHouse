@@ -1,14 +1,19 @@
 #pragma once
 
+#include "Common/NamePrompter.h"
 #include <Common/ProgressIndication.h>
 #include <Common/InterruptListener.h>
 #include <Common/ShellCommand.h>
+#include <Common/Stopwatch.h>
+#include <Common/DNSResolver.h>
 #include <Core/ExternalTable.h>
 #include <Poco/Util/Application.h>
 #include <Interpreters/Context.h>
 #include <Client/Suggest.h>
 #include <Client/QueryFuzzer.h>
 #include <boost/program_options.hpp>
+#include <Storages/StorageFile.h>
+#include <Storages/SelectQueryInfo.h>
 
 namespace po = boost::program_options;
 
@@ -34,7 +39,7 @@ void interruptSignalHandler(int signum);
 
 class InternalTextLogs;
 
-class ClientBase : public Poco::Util::Application
+class ClientBase : public Poco::Util::Application, public IHints<2, ClientBase>
 {
 
 public:
@@ -44,6 +49,8 @@ public:
     ~ClientBase() override;
 
     void init(int argc, char ** argv);
+
+    std::vector<String> getAllRegisteredNames() const override { return cmd_options; }
 
 protected:
     void runInteractive();
@@ -75,9 +82,6 @@ protected:
         String & query_to_execute, ASTPtr & parsed_query, const String & all_queries_text,
         std::optional<Exception> & current_exception);
 
-    /// For non-interactive multi-query mode get queries text prefix.
-    virtual String getQueryTextPrefix() { return ""; }
-
     static void clearTerminal();
     void showClientVersion();
 
@@ -91,15 +95,16 @@ protected:
     };
 
     virtual void printHelpMessage(const OptionsDescription & options_description) = 0;
-    virtual void addAndCheckOptions(OptionsDescription & options_description, po::variables_map & options, Arguments & arguments) = 0;
+    virtual void addOptions(OptionsDescription & options_description) = 0;
     virtual void processOptions(const OptionsDescription & options_description,
                                 const CommandLineOptions & options,
                                 const std::vector<Arguments> & external_tables_arguments) = 0;
     virtual void processConfig() = 0;
 
-private:
+protected:
     bool processQueryText(const String & text);
 
+private:
     void receiveResult(ASTPtr parsed_query);
     bool receiveAndProcessPacket(ASTPtr parsed_query, bool cancelled);
     void receiveLogs(ASTPtr parsed_query);
@@ -119,31 +124,40 @@ private:
     void sendData(Block & sample, const ColumnsDescription & columns_description, ASTPtr parsed_query);
     void sendDataFrom(ReadBuffer & buf, Block & sample,
                       const ColumnsDescription & columns_description, ASTPtr parsed_query);
+    void sendDataFromPipe(Pipe && pipe, ASTPtr parsed_query);
     void sendExternalTables(ASTPtr parsed_query);
 
     void initBlockOutputStream(const Block & block, ASTPtr parsed_query);
     void initLogsOutputStream();
 
-    inline String prompt() const
-    {
-        return boost::replace_all_copy(prompt_by_server_display_name, "{database}", config().getString("database", "default"));
-    }
+    String prompt() const;
 
     void resetOutput();
     void outputQueryInfo(bool echo_query_);
     void readArguments(int argc, char ** argv, Arguments & common_arguments, std::vector<Arguments> & external_tables_arguments);
+    void parseAndCheckOptions(OptionsDescription & options_description, po::variables_map & options, Arguments & arguments);
+
+    void updateSuggest(const ASTCreateQuery & ast_create);
+
+    void initQueryIdFormats();
 
 protected:
+    static bool isSyncInsertWithData(const ASTInsertQuery & insert_query, const ContextPtr & context);
+
     bool is_interactive = false; /// Use either interactive line editing interface or batch mode.
     bool is_multiquery = false;
+    bool delayed_interactive = false;
 
     bool echo_queries = false; /// Print queries before execution in batch mode.
     bool ignore_error = false; /// In case of errors, don't print error message, continue to next query. Only applicable for non-interactive mode.
     bool print_time_to_stderr = false; /// Output execution time to stderr in batch mode.
+
+    std::optional<Suggest> suggest;
     bool load_suggestions = false;
 
     std::vector<String> queries_files; /// If not empty, queries will be read from these files
     std::vector<String> interleave_queries_files; /// If not empty, run queries from these files before processing every file from 'queries_files'.
+    std::vector<String> cmd_options;
 
     bool stdin_is_a_tty = false; /// stdin is a terminal.
     bool stdout_is_a_tty = false; /// stdout is a terminal.
@@ -153,6 +167,7 @@ protected:
     ConnectionParameters connection_parameters;
 
     String format; /// Query results output format.
+    bool select_into_file = false; /// If writing result INTO OUTFILE. It affects progress rendering.
     bool is_default_format = true; /// false, if format is set in the config or command line.
     size_t format_max_block_size = 0; /// Max block size for console output.
     String insert_format; /// Format of INSERT data that is read from stdin in batch mode.
@@ -200,6 +215,7 @@ protected:
     bool written_first_block = false;
     size_t processed_rows = 0; /// How many rows have been read or written.
 
+    bool print_stack_trace = false;
     /// The last exception that was received from the server. Is used for the
     /// return code in batch mode.
     std::unique_ptr<Exception> server_exception;
@@ -217,7 +233,36 @@ protected:
     QueryFuzzer fuzzer;
     int query_fuzzer_runs = 0;
 
+    struct
+    {
+        bool print = false;
+        /// UINT64_MAX -- print only last
+        UInt64 delay_ms = 0;
+        Stopwatch watch;
+        /// For printing only last (delay_ms == 0).
+        Block last_block;
+    } profile_events;
+
     QueryProcessingStage::Enum query_processing_stage;
+
+    struct HostPort
+    {
+        String host;
+        std::optional<UInt16> port{};
+        friend std::istream & operator>>(std::istream & in, HostPort & hostPort)
+        {
+            String host_with_port;
+            in >> host_with_port;
+            DB::DNSResolver & resolver = DB::DNSResolver::instance();
+            std::pair<Poco::Net::IPAddress, std::optional<UInt16>>
+                host_and_port = resolver.resolveHostOrAddress(host_with_port);
+            hostPort.host = host_and_port.first.toString();
+            hostPort.port = host_and_port.second;
+
+            return in;
+        }
+    };
+    std::vector<HostPort> hosts_ports{};
 };
 
 }

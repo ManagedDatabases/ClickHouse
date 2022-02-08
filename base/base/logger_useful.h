@@ -12,6 +12,8 @@ namespace
 {
     template <typename... Ts> constexpr size_t numArgs(Ts &&...) { return sizeof...(Ts); }
     template <typename T, typename... Ts> constexpr auto firstArg(T && x, Ts &&...) { return std::forward<T>(x); }
+    /// For implicit conversion of fmt::basic_runtime<> to char* for std::string ctor
+    template <typename T, typename... Ts> constexpr auto firstArg(fmt::basic_runtime<T> && data, Ts &&...) { return data.str.data(); }
 }
 
 
@@ -49,12 +51,3 @@ namespace
 #define LOG_WARNING(logger, ...) LOG_IMPL(logger, DB::LogsLevel::warning, Poco::Message::PRIO_WARNING, __VA_ARGS__)
 #define LOG_ERROR(logger, ...)   LOG_IMPL(logger, DB::LogsLevel::error, Poco::Message::PRIO_ERROR, __VA_ARGS__)
 #define LOG_FATAL(logger, ...)   LOG_IMPL(logger, DB::LogsLevel::error, Poco::Message::PRIO_FATAL, __VA_ARGS__)
-
-
-/// Compatibility for external projects.
-#if defined(ARCADIA_BUILD)
-    using Poco::Logger;
-    using Poco::Message;
-    using DB::LogsLevel;
-    using DB::CurrentThread;
-#endif

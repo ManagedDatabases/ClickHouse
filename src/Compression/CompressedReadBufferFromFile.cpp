@@ -44,12 +44,6 @@ bool CompressedReadBufferFromFile::nextImpl()
 }
 
 
-void CompressedReadBufferFromFile::prefetch()
-{
-    file_in.prefetch();
-}
-
-
 CompressedReadBufferFromFile::CompressedReadBufferFromFile(std::unique_ptr<ReadBufferFromFileBase> buf, bool allow_different_codecs_)
     : BufferWithOwnMemory<ReadBuffer>(0), p_file_in(std::move(buf)), file_in(*p_file_in)
 {
@@ -58,17 +52,9 @@ CompressedReadBufferFromFile::CompressedReadBufferFromFile(std::unique_ptr<ReadB
 }
 
 
-CompressedReadBufferFromFile::CompressedReadBufferFromFile(
-    const std::string & path,
-    const ReadSettings & settings,
-    size_t estimated_size,
-    bool allow_different_codecs_)
-    : BufferWithOwnMemory<ReadBuffer>(0)
-    , p_file_in(createReadBufferFromFileBase(path, settings, estimated_size))
-    , file_in(*p_file_in)
+void CompressedReadBufferFromFile::prefetch()
 {
-    compressed_in = &file_in;
-    allow_different_codecs = allow_different_codecs_;
+    file_in.prefetch();
 }
 
 
@@ -94,7 +80,7 @@ void CompressedReadBufferFromFile::seek(size_t offset_in_compressed_file, size_t
         /// We will discard our working_buffer, but have to account rest bytes
         bytes += offset();
         /// No data, everything discarded
-        pos = working_buffer.end();
+        resetWorkingBuffer();
         size_compressed = 0;
         /// Remember required offset in decompressed block which will be set in
         /// the next ReadBuffer::next() call
@@ -127,7 +113,6 @@ size_t CompressedReadBufferFromFile::readBig(char * to, size_t n)
         /// need to skip some bytes in decompressed data (seek happened before readBig call).
         if (nextimpl_working_buffer_offset == 0 && size_decompressed + additional_size_at_the_end_of_buffer <= n - bytes_read)
         {
-
             decompressTo(to + bytes_read, size_decompressed, size_compressed_without_checksum);
             bytes_read += size_decompressed;
             bytes += size_decompressed;

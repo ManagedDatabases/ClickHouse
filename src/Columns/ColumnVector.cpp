@@ -1,6 +1,5 @@
 #include "ColumnVector.h"
 
-#include <pdqsort.h>
 #include <Columns/ColumnsCommon.h>
 #include <Columns/ColumnCompressed.h>
 #include <Columns/MaskOperations.h>
@@ -118,7 +117,6 @@ struct ColumnVector<T>::equals
     bool operator()(size_t lhs, size_t rhs) const { return CompareHelper<T>::equals(parent.data[lhs], parent.data[rhs], nan_direction_hint); }
 };
 
-
 namespace
 {
     template <typename T>
@@ -158,9 +156,9 @@ void ColumnVector<T>::getPermutation(bool reverse, size_t limit, int nan_directi
             res[i] = i;
 
         if (reverse)
-            partial_sort(res.begin(), res.begin() + limit, res.end(), greater(*this, nan_direction_hint));
+            ::partial_sort(res.begin(), res.begin() + limit, res.end(), greater(*this, nan_direction_hint));
         else
-            partial_sort(res.begin(), res.begin() + limit, res.end(), less(*this, nan_direction_hint));
+            ::partial_sort(res.begin(), res.begin() + limit, res.end(), less(*this, nan_direction_hint));
     }
     else
     {
@@ -204,16 +202,16 @@ void ColumnVector<T>::getPermutation(bool reverse, size_t limit, int nan_directi
             res[i] = i;
 
         if (reverse)
-            pdqsort(res.begin(), res.end(), greater(*this, nan_direction_hint));
+            ::sort(res.begin(), res.end(), greater(*this, nan_direction_hint));
         else
-            pdqsort(res.begin(), res.end(), less(*this, nan_direction_hint));
+            ::sort(res.begin(), res.end(), less(*this, nan_direction_hint));
     }
 }
 
 template <typename T>
 void ColumnVector<T>::updatePermutation(bool reverse, size_t limit, int nan_direction_hint, IColumn::Permutation & res, EqualRanges & equal_range) const
 {
-    auto sort = [](auto begin, auto end, auto pred) { pdqsort(begin, end, pred); };
+    auto sort = [](auto begin, auto end, auto pred) { ::sort(begin, end, pred); };
     auto partial_sort = [](auto begin, auto mid, auto end, auto pred) { ::partial_sort(begin, mid, end, pred); };
 
     if (reverse)
@@ -311,23 +309,19 @@ ColumnPtr ColumnVector<T>::filter(const IColumn::Filter & filt, ssize_t result_s
     const UInt8 * filt_end = filt_pos + size;
     const T * data_pos = data.data();
 
-#ifdef __SSE2__
     /** A slightly more optimized version.
     * Based on the assumption that often pieces of consecutive values
     *  completely pass or do not pass the filter.
     * Therefore, we will optimistically check the parts of `SIMD_BYTES` values.
     */
+    static constexpr size_t SIMD_BYTES = 64;
+    const UInt8 * filt_end_aligned = filt_pos + size / SIMD_BYTES * SIMD_BYTES;
 
-    static constexpr size_t SIMD_BYTES = 16;
-    const __m128i zero16 = _mm_setzero_si128();
-    const UInt8 * filt_end_sse = filt_pos + size / SIMD_BYTES * SIMD_BYTES;
-
-    while (filt_pos < filt_end_sse)
+    while (filt_pos < filt_end_aligned)
     {
-        UInt16 mask = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i *>(filt_pos)), zero16));
-        mask = ~mask;
+        UInt64 mask = bytes64MaskToBits64Mask(filt_pos);
 
-        if (0xFFFF == mask)
+        if (0xffffffffffffffff == mask)
         {
             res_data.insert(data_pos, data_pos + SIMD_BYTES);
         }
@@ -335,16 +329,19 @@ ColumnPtr ColumnVector<T>::filter(const IColumn::Filter & filt, ssize_t result_s
         {
             while (mask)
             {
-                size_t index = __builtin_ctz(mask);
+                size_t index = __builtin_ctzll(mask);
                 res_data.push_back(data_pos[index]);
-                mask = mask & (mask - 1);
+            #ifdef __BMI__
+                mask = _blsr_u64(mask);
+            #else
+                mask = mask & (mask-1);
+            #endif
             }
         }
 
         filt_pos += SIMD_BYTES;
         data_pos += SIMD_BYTES;
     }
-#endif
 
     while (filt_pos < filt_end)
     {
@@ -482,7 +479,8 @@ void ColumnVector<T>::getExtremes(Field & min, Field & max) const
 template <typename T>
 ColumnPtr ColumnVector<T>::compress() const
 {
-    size_t source_size = data.size() * sizeof(T);
+    const size_t data_size = data.size();
+    const size_t source_size = data_size * sizeof(T);
 
     /// Don't compress small blocks.
     if (source_size < 4096) /// A wild guess.
@@ -493,14 +491,33 @@ ColumnPtr ColumnVector<T>::compress() const
     if (!compressed)
         return ColumnCompressed::wrap(this->getPtr());
 
-    return ColumnCompressed::create(data.size(), compressed->size(),
-        [compressed = std::move(compressed), column_size = data.size()]
+    const size_t compressed_size = compressed->size();
+    return ColumnCompressed::create(data_size, compressed_size,
+        [compressed = std::move(compressed), column_size = data_size]
         {
             auto res = ColumnVector<T>::create(column_size);
             ColumnCompressed::decompressBuffer(
                 compressed->data(), res->getData().data(), compressed->size(), column_size * sizeof(T));
             return res;
         });
+}
+
+template <typename T>
+ColumnPtr ColumnVector<T>::createWithOffsets(const IColumn::Offsets & offsets, const Field & default_field, size_t total_rows, size_t shift) const
+{
+    if (offsets.size() + shift != size())
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "Incompatible sizes of offsets ({}), shift ({}) and size of column {}", offsets.size(), shift, size());
+
+    auto res = this->create();
+    auto & res_data = res->getData();
+
+    T default_value = safeGet<T>(default_field);
+    res_data.resize_fill(total_rows, default_value);
+    for (size_t i = 0; i < offsets.size(); ++i)
+        res_data[offsets[i]] = data[i + shift];
+
+    return res;
 }
 
 /// Explicit template instantiations - to avoid code bloat in headers.

@@ -168,4 +168,10 @@ enum class ShortCircuitFunctionEvaluation
 
 DECLARE_SETTING_ENUM(ShortCircuitFunctionEvaluation)
 
+DECLARE_SETTING_ENUM_WITH_RENAME(EnumComparingMode, FormatSettings::EnumComparingMode)
+
+DECLARE_SETTING_ENUM_WITH_RENAME(EscapingRule, FormatSettings::EscapingRule)
+
+DECLARE_SETTING_ENUM_WITH_RENAME(MsgPackUUIDRepresentation, FormatSettings::MsgPackUUIDRepresentation)
+
 }

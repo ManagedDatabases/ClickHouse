@@ -70,6 +70,9 @@ struct TreeRewriterResult
     /// Cache isRemote() call for storage, because it may be too heavy.
     bool is_remote_storage = false;
 
+    /// Rewrite _shard_num to shardNum()
+    bool has_virtual_shard_num = false;
+
     /// Results of scalar sub queries
     Scalars scalars;
 
@@ -110,7 +113,8 @@ public:
         ConstStoragePtr storage = {},
         const StorageMetadataPtr & metadata_snapshot = {},
         bool allow_aggregations = false,
-        bool allow_self_aliases = true) const;
+        bool allow_self_aliases = true,
+        bool execute_scalar_subqueries = true) const;
 
     /// Analyze and rewrite select query
     TreeRewriterResultPtr analyzeSelect(

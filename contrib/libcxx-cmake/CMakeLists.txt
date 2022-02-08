@@ -47,6 +47,7 @@ set(SRCS
 )
 
 add_library(cxx ${SRCS})
+set_target_properties(cxx PROPERTIES FOLDER "contrib/libcxx-cmake")
 
 target_include_directories(cxx SYSTEM BEFORE PUBLIC $<BUILD_INTERFACE:${LIBCXX_SOURCE_DIR}/include>)
 target_compile_definitions(cxx PRIVATE -D_LIBCPP_BUILDING_LIBRARY -DLIBCXX_BUILDING_LIBCXXABI)
@@ -71,6 +72,11 @@ target_compile_options(cxx PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-nostdinc++>)
 target_compile_options(cxx PRIVATE -w)
 
 target_link_libraries(cxx PUBLIC cxxabi)
+
+# For __udivmodti4, __divmodti4.
+if (OS_DARWIN AND COMPILER_GCC)
+    target_link_libraries(cxx PRIVATE gcc)
+endif ()
 
 install(
     TARGETS cxx

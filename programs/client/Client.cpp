@@ -1,47 +1,33 @@
 #include <stdlib.h>
 #include <fcntl.h>
-#include <signal.h>
 #include <map>
 #include <iostream>
-#include <fstream>
 #include <iomanip>
-#include <unordered_set>
-#include <algorithm>
 #include <optional>
 #include <base/scope_guard_safe.h>
 #include <boost/program_options.hpp>
 #include <boost/algorithm/string/replace.hpp>
-#include <Poco/String.h>
 #include <filesystem>
 #include <string>
 #include "Client.h"
 #include "Core/Protocol.h"
 
-#include <base/argsToConfig.h>
 #include <base/find_symbols.h>
 
-#if !defined(ARCADIA_BUILD)
-#    include <Common/config_version.h>
-#endif
+#include <Common/config_version.h>
 #include <Common/Exception.h>
 #include <Common/formatReadable.h>
-#include <Common/NetException.h>
-#include <Common/Config/ConfigProcessor.h>
-#include <Common/PODArray.h>
 #include <Common/TerminalSize.h>
 #include <Common/Config/configReadClient.h>
-#include "Common/MemoryTracker.h"
 
 #include <Core/QueryProcessingStage.h>
 #include <Client/TestHint.h>
 #include <Columns/ColumnString.h>
-#include <Columns/ColumnsNumber.h>
 #include <Poco/Util/Application.h>
 
 #include <IO/ReadBufferFromString.h>
 #include <IO/ReadHelpers.h>
 #include <IO/WriteHelpers.h>
-#include <IO/Operators.h>
 #include <IO/WriteBufferFromOStream.h>
 #include <IO/UseSSL.h>
 
@@ -51,9 +37,6 @@
 #include <Parsers/ASTUseQuery.h>
 #include <Parsers/ASTInsertQuery.h>
 #include <Parsers/ASTSelectQuery.h>
-#include <Parsers/ASTLiteral.h>
-#include <Parsers/ASTIdentifier.h>
-#include <Parsers/formatAST.h>
 
 #include <Interpreters/InterpreterSetQuery.h>
 
@@ -65,14 +48,6 @@
 #ifndef __clang__
 #pragma GCC optimize("-fno-var-tracking-assignments")
 #endif
-
-namespace CurrentMetrics
-{
-    extern const Metric Revision;
-    extern const Metric VersionInteger;
-    extern const Metric MemoryTracking;
-    extern const Metric MaxDDLEntryID;
-}
 
 namespace fs = std::filesystem;
 
@@ -86,7 +61,6 @@ namespace ErrorCodes
     extern const int SYNTAX_ERROR;
     extern const int TOO_DEEP_RECURSION;
     extern const int NETWORK_ERROR;
-    extern const int UNRECOGNIZED_ARGUMENTS;
     extern const int AUTHENTICATION_FAILED;
 }
 
@@ -95,7 +69,6 @@ void Client::processError(const String & query) const
 {
     if (server_exception)
     {
-        bool print_stack_trace = config().getBool("stacktrace", false);
         fmt::print(stderr, "Received exception from server (version {}):\n{}\n",
                 server_version,
                 getExceptionMessage(*server_exception, print_stack_trace, true));
@@ -234,7 +207,7 @@ bool Client::executeMultiQuery(const String & all_queries_text)
                 {
                     // Surprisingly, this is a client error. A server error would
                     // have been reported w/o throwing (see onReceiveSeverException()).
-                    client_exception = std::make_unique<Exception>(getCurrentExceptionMessage(true), getCurrentExceptionCode());
+                    client_exception = std::make_unique<Exception>(getCurrentExceptionMessage(print_stack_trace), getCurrentExceptionCode());
                     have_error = true;
                 }
                 // Check whether the error (or its absence) matches the test hints
@@ -313,7 +286,7 @@ bool Client::executeMultiQuery(const String & all_queries_text)
                 // , where the inline data is delimited by semicolon and not by a
                 // newline.
                 auto * insert_ast = parsed_query->as<ASTInsertQuery>();
-                if (insert_ast && insert_ast->data)
+                if (insert_ast && isSyncInsertWithData(*insert_ast, global_context))
                 {
                     this_query_end = insert_ast->end;
                     adjustQueryEnd(this_query_end, all_queries_end, global_context->getSettingsRef().max_parser_depth);
@@ -340,7 +313,9 @@ std::vector<String> Client::loadWarningMessages()
 {
     std::vector<String> messages;
     connection->sendQuery(connection_parameters.timeouts, "SELECT message FROM system.warnings", "" /* query_id */,
-                          QueryProcessingStage::Complete, nullptr, nullptr, false);
+                          QueryProcessingStage::Complete,
+                          &global_context->getSettingsRef(),
+                          &global_context->getClientInfo(), false);
     while (true)
     {
         Packet packet = connection->receivePacket();
@@ -423,22 +398,13 @@ try
     std::cout << std::fixed << std::setprecision(3);
     std::cerr << std::fixed << std::setprecision(3);
 
-    /// Limit on total memory usage
-    size_t max_client_memory_usage = config().getInt64("max_memory_usage_in_client", 0 /*default value*/);
-
-    if (max_client_memory_usage != 0)
-    {
-        total_memory_tracker.setHardLimit(max_client_memory_usage);
-        total_memory_tracker.setDescription("(total)");
-        total_memory_tracker.setMetric(CurrentMetrics::MemoryTracking);
-    }
-
     registerFormats();
     registerFunctions();
     registerAggregateFunctions();
 
     processConfig();
 
+    /// Includes delayed_interactive.
     if (is_interactive)
     {
         clearTerminal();
@@ -447,28 +413,28 @@ try
 
     connect();
 
-    if (is_interactive)
+    /// Load Warnings at the beginning of connection
+    if (is_interactive && !config().has("no-warnings"))
     {
-        /// Load Warnings at the beginning of connection
-        if (!config().has("no-warnings"))
+        try
         {
-            try
+            std::vector<String> messages = loadWarningMessages();
+            if (!messages.empty())
             {
-                std::vector<String> messages = loadWarningMessages();
-                if (!messages.empty())
-                {
-                    std::cout << "Warnings:" << std::endl;
-                    for (const auto & message : messages)
-                        std::cout << " * " << message << std::endl;
-                    std::cout << std::endl;
-                }
-            }
-            catch (...)
-            {
-                /// Ignore exception
+                std::cout << "Warnings:" << std::endl;
+                for (const auto & message : messages)
+                    std::cout << " * " << message << std::endl;
+                std::cout << std::endl;
             }
         }
+        catch (...)
+        {
+            /// Ignore exception
+        }
+    }
 
+    if (is_interactive && !delayed_interactive)
+    {
         runInteractive();
     }
     else
@@ -492,14 +458,17 @@ try
             // case so that at least we don't lose an error.
             return -1;
         }
+
+        if (delayed_interactive)
+            runInteractive();
     }
 
     return 0;
 }
 catch (const Exception & e)
 {
-    bool print_stack_trace = config().getBool("stacktrace", false) && e.code() != ErrorCodes::NETWORK_ERROR;
-    std::cerr << getExceptionMessage(e, print_stack_trace, true) << std::endl << std::endl;
+    bool need_print_stack_trace = config().getBool("stacktrace", false) && e.code() != ErrorCodes::NETWORK_ERROR;
+    std::cerr << getExceptionMessage(e, need_print_stack_trace, true) << std::endl << std::endl;
     /// If exception code isn't zero, we should return non-zero return code anyway.
     return e.code() ? e.code() : -1;
 }
@@ -512,48 +481,76 @@ catch (...)
 
 void Client::connect()
 {
-    connection_parameters = ConnectionParameters(config());
-
-    if (is_interactive)
-        std::cout << "Connecting to "
-                    << (!connection_parameters.default_database.empty() ? "database " + connection_parameters.default_database + " at "
-                                                                        : "")
-                    << connection_parameters.host << ":" << connection_parameters.port
-                    << (!connection_parameters.user.empty() ? " as user " + connection_parameters.user : "") << "." << std::endl;
+    UInt16 default_port = ConnectionParameters::getPortFromConfig(config());
+    connection_parameters = ConnectionParameters(config(), hosts_ports[0].host,
+                                                 hosts_ports[0].port.value_or(default_port));
 
     String server_name;
     UInt64 server_version_major = 0;
     UInt64 server_version_minor = 0;
     UInt64 server_version_patch = 0;
 
-    try
+    for (size_t attempted_address_index = 0; attempted_address_index < hosts_ports.size(); ++attempted_address_index)
     {
-        connection = Connection::createConnection(connection_parameters, global_context);
+        connection_parameters.host = hosts_ports[attempted_address_index].host;
+        connection_parameters.port = hosts_ports[attempted_address_index].port.value_or(default_port);
 
-        if (max_client_network_bandwidth)
+        if (is_interactive)
+            std::cout << "Connecting to "
+                      << (!connection_parameters.default_database.empty() ? "database " + connection_parameters.default_database + " at "
+                                                                          : "")
+                      << connection_parameters.host << ":" << connection_parameters.port
+                      << (!connection_parameters.user.empty() ? " as user " + connection_parameters.user : "") << "." << std::endl;
+
+        try
         {
-            ThrottlerPtr throttler = std::make_shared<Throttler>(max_client_network_bandwidth, 0, "");
-            connection->setThrottler(throttler);
-        }
+            connection = Connection::createConnection(connection_parameters, global_context);
 
-        connection->getServerVersion(
-            connection_parameters.timeouts, server_name, server_version_major, server_version_minor, server_version_patch, server_revision);
-    }
-    catch (const Exception & e)
-    {
-        /// It is typical when users install ClickHouse, type some password and instantly forget it.
-        if ((connection_parameters.user.empty() || connection_parameters.user == "default")
-            && e.code() == DB::ErrorCodes::AUTHENTICATION_FAILED)
+            if (max_client_network_bandwidth)
+            {
+                ThrottlerPtr throttler = std::make_shared<Throttler>(max_client_network_bandwidth, 0, "");
+                connection->setThrottler(throttler);
+            }
+
+            connection->getServerVersion(
+                connection_parameters.timeouts, server_name, server_version_major, server_version_minor, server_version_patch, server_revision);
+            config().setString("host", connection_parameters.host);
+            config().setInt("port", connection_parameters.port);
+            break;
+        }
+        catch (const Exception & e)
         {
-            std::cerr << std::endl
-                << "If you have installed ClickHouse and forgot password you can reset it in the configuration file." << std::endl
-                << "The password for default user is typically located at /etc/clickhouse-server/users.d/default-password.xml" << std::endl
-                << "and deleting this file will reset the password." << std::endl
-                << "See also /etc/clickhouse-server/users.xml on the server where ClickHouse is installed." << std::endl
-                << std::endl;
-        }
+            /// It is typical when users install ClickHouse, type some password and instantly forget it.
+            /// This problem can't be fixed with reconnection so it is not attempted
+            if ((connection_parameters.user.empty() || connection_parameters.user == "default")
+                && e.code() == DB::ErrorCodes::AUTHENTICATION_FAILED)
+            {
+                std::cerr << std::endl
+                          << "If you have installed ClickHouse and forgot password you can reset it in the configuration file." << std::endl
+                          << "The password for default user is typically located at /etc/clickhouse-server/users.d/default-password.xml" << std::endl
+                          << "and deleting this file will reset the password." << std::endl
+                          << "See also /etc/clickhouse-server/users.xml on the server where ClickHouse is installed." << std::endl
+                          << std::endl;
+                throw;
+            }
+            else
+            {
+                if (attempted_address_index == hosts_ports.size() - 1)
+                    throw;
 
-        throw;
+                if (is_interactive)
+                {
+                    std::cerr << "Connection attempt to database at "
+                              << connection_parameters.host << ":" << connection_parameters.port
+                              << " resulted in failure"
+                              << std::endl
+                              << getExceptionMessage(e, false)
+                              << std::endl
+                              << "Attempting connection to the next provided address"
+                              << std::endl;
+                }
+            }
+        }
     }
 
     server_version = toString(server_version_major) + "." + toString(server_version_minor) + "." + toString(server_version_patch);
@@ -565,8 +562,7 @@ void Client::connect()
     if (is_interactive)
     {
         std::cout << "Connected to " << server_name << " server version " << server_version << " revision " << server_revision << "."
-                    << std::endl
-                    << std::endl;
+                    << std::endl << std::endl;
 
         auto client_version_tuple = std::make_tuple(VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
         auto server_version_tuple = std::make_tuple(server_version_major, server_version_minor, server_version_patch);
@@ -713,16 +709,16 @@ bool Client::processWithFuzzing(const String & full_query)
             throw;
     }
 
+    if (!orig_ast)
+    {
+        // Can't continue after a parsing error
+        return true;
+    }
+
     // `USE db` should not be executed
     // since this will break every query after `DROP db`
     if (orig_ast->as<ASTUseQuery>())
     {
-        return true;
-    }
-
-    if (!orig_ast)
-    {
-        // Can't continue after a parsing error
         return true;
     }
 
@@ -822,7 +818,7 @@ bool Client::processWithFuzzing(const String & full_query)
             // uniformity.
             // Surprisingly, this is a client exception, because we get the
             // server exception w/o throwing (see onReceiveException()).
-            client_exception = std::make_unique<Exception>(getCurrentExceptionMessage(true), getCurrentExceptionCode());
+            client_exception = std::make_unique<Exception>(getCurrentExceptionMessage(print_stack_trace), getCurrentExceptionCode());
             have_error = true;
         }
 
@@ -993,13 +989,16 @@ void Client::printHelpMessage(const OptionsDescription & options_description)
 }
 
 
-void Client::addAndCheckOptions(OptionsDescription & options_description, po::variables_map & options, Arguments & arguments)
+void Client::addOptions(OptionsDescription & options_description)
 {
     /// Main commandline options related to client functionality and all parameters from Settings.
     options_description.main_description->add_options()
         ("config,c", po::value<std::string>(), "config-file path (another shorthand)")
-        ("host,h", po::value<std::string>()->default_value("localhost"), "server host")
-        ("port", po::value<int>()->default_value(9000), "server port")
+        ("host,h", po::value<std::vector<HostPort>>()->multitoken()->default_value({{"localhost"}}, "localhost"),
+         "list of server hosts with optionally assigned port to connect. List elements are separated by a space."
+         "Every list element looks like '<host>[:<port>]'. If port isn't assigned, connection is made by port from '--port' param"
+         "Example of usage: '-h host1:1 host2 host3:3'")
+        ("port", po::value<int>()->default_value(9000), "server port, which is default port for every host from '--host' param")
         ("secure,s", "Use TLS connection")
         ("user,u", po::value<std::string>()->default_value("default"), "user")
         /** If "--password [value]" is used but the value is omitted, the bad argument exception will be thrown.
@@ -1011,14 +1010,10 @@ void Client::addAndCheckOptions(OptionsDescription & options_description, po::va
         ("password", po::value<std::string>()->implicit_value("\n", ""), "password")
         ("ask-password", "ask-password")
         ("quota_key", po::value<std::string>(), "A string to differentiate quotas when the user have keyed quotas configured on server")
-        ("pager", po::value<std::string>(), "pager")
         ("testmode,T", "enable test hints in comments")
 
         ("max_client_network_bandwidth", po::value<int>(), "the maximum speed of data exchange over the network for the client in bytes per second.")
         ("compression", po::value<bool>(), "enable or disable compression")
-
-        ("log-level", po::value<std::string>(), "client log level")
-        ("server_logs_file", po::value<std::string>(), "put server logs into specified file")
 
         ("query-fuzzer-runs", po::value<int>()->default_value(0), "After executing every SELECT query, do random mutations in it and run again specified number of times. This is used for testing to discover unexpected corner cases.")
         ("interleave-queries-file", po::value<std::vector<std::string>>()->multitoken(),
@@ -1028,7 +1023,6 @@ void Client::addAndCheckOptions(OptionsDescription & options_description, po::va
         ("opentelemetry-tracestate", po::value<std::string>(), "OpenTelemetry tracestate header as described by W3C Trace Context recommendation")
 
         ("no-warnings", "disable warnings when client connects to server")
-        ("max_memory_usage_in_client", po::value<int>(), "sets memory limit in client")
     ;
 
     /// Commandline options related to external tables.
@@ -1050,14 +1044,6 @@ void Client::addAndCheckOptions(OptionsDescription & options_description, po::va
     (
         "types", po::value<std::string>(), "types"
     );
-
-    cmd_settings.addProgramOptions(options_description.main_description.value());
-    /// Parse main commandline options.
-    po::parsed_options parsed = po::command_line_parser(arguments).options(options_description.main_description.value()).run();
-    auto unrecognized_options = po::collect_unrecognized(parsed.options, po::collect_unrecognized_mode::include_positional);
-    if (unrecognized_options.size() > 1)
-        throw Exception(ErrorCodes::UNRECOGNIZED_ARGUMENTS, "Unrecognized option '{}'", unrecognized_options[1]);
-    po::store(parsed, options);
 }
 
 
@@ -1119,12 +1105,10 @@ void Client::processOptions(const OptionsDescription & options_description,
 
     if (options.count("config"))
         config().setString("config-file", options["config"].as<std::string>());
-    if (options.count("host") && !options["host"].defaulted())
-        config().setString("host", options["host"].as<std::string>());
+    if (options.count("host"))
+        hosts_ports = options["host"].as<std::vector<HostPort>>();
     if (options.count("interleave-queries-file"))
         interleave_queries_files = options["interleave-queries-file"].as<std::vector<std::string>>();
-    if (options.count("pager"))
-        config().setString("pager", options["pager"].as<std::string>());
     if (options.count("port") && !options["port"].defaulted())
         config().setInt("port", options["port"].as<int>());
     if (options.count("secure"))
@@ -1143,8 +1127,6 @@ void Client::processOptions(const OptionsDescription & options_description,
         max_client_network_bandwidth = options["max_client_network_bandwidth"].as<int>();
     if (options.count("compression"))
         config().setBool("compression", options["compression"].as<bool>());
-    if (options.count("server_logs_file"))
-        server_logs_file = options["server_logs_file"].as<std::string>();
     if (options.count("no-warnings"))
         config().setBool("no-warnings", true);
 
@@ -1179,11 +1161,11 @@ void Client::processConfig()
     /// - stdin is not a terminal. In this case queries are read from it.
     /// - -qf (--queries-file) command line option is present.
     ///   The value of the option is used as file with query (or of multiple queries) to execute.
-    if (stdin_is_a_tty && !config().has("query") && queries_files.empty())
-    {
-        if (config().has("query") && config().has("queries-file"))
-            throw Exception("Specify either `query` or `queries-file` option", ErrorCodes::BAD_ARGUMENTS);
 
+    delayed_interactive = config().has("interactive") && (config().has("query") || config().has("queries-file"));
+    if (stdin_is_a_tty
+        && (delayed_interactive || (!config().has("query") && queries_files.empty())))
+    {
         is_interactive = true;
     }
     else
@@ -1196,6 +1178,7 @@ void Client::processConfig()
         if (!query_id.empty())
             global_context->setCurrentQueryId(query_id);
     }
+    print_stack_trace = config().getBool("stacktrace", false);
 
     if (config().has("multiquery"))
         is_multiquery = true;
@@ -1235,15 +1218,15 @@ int mainEntryClickHouseClient(int argc, char ** argv)
         client.init(argc, argv);
         return client.run();
     }
-    catch (const boost::program_options::error & e)
-    {
-        std::cerr << "Bad arguments: " << e.what() << std::endl;
-        return 1;
-    }
     catch (const DB::Exception & e)
     {
         std::cerr << DB::getExceptionMessage(e, false) << std::endl;
         return 1;
+    }
+    catch (const boost::program_options::error & e)
+    {
+        std::cerr << "Bad arguments: " << e.what() << std::endl;
+        return DB::ErrorCodes::BAD_ARGUMENTS;
     }
     catch (...)
     {

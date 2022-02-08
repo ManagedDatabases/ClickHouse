@@ -25,6 +25,8 @@
 #include <Storages/StorageFactory.h>
 #include <Storages/registerStorages.h>
 #include <DataTypes/DataTypeFactory.h>
+#include <Formats/FormatFactory.h>
+#include <Formats/registerFormats.h>
 
 
 #pragma GCC diagnostic ignored "-Wunused-function"
@@ -55,8 +57,16 @@ int mainEntryClickHouseFormat(int argc, char ** argv)
         ("seed", po::value<std::string>(), "seed (arbitrary string) that determines the result of obfuscation")
     ;
 
+    Settings cmd_settings;
+    for (const auto & field : cmd_settings.all())
+    {
+        if (field.getName() == "max_parser_depth" || field.getName() == "max_query_size")
+            cmd_settings.addProgramOption(desc, field);
+    }
+
     boost::program_options::variables_map options;
     boost::program_options::store(boost::program_options::parse_command_line(argc, argv, desc), options);
+    po::notify(options);
 
     if (options.count("help"))
     {
@@ -114,6 +124,7 @@ int mainEntryClickHouseFormat(int argc, char ** argv)
             registerAggregateFunctions();
             registerTableFunctions();
             registerStorages();
+            registerFormats();
 
             std::unordered_set<std::string> additional_names;
 
@@ -130,6 +141,8 @@ int mainEntryClickHouseFormat(int argc, char ** argv)
                 return FunctionFactory::instance().has(what)
                     || AggregateFunctionFactory::instance().isAggregateFunctionName(what)
                     || TableFunctionFactory::instance().isTableFunctionName(what)
+                    || FormatFactory::instance().isOutputFormat(what)
+                    || FormatFactory::instance().isInputFormat(what)
                     || additional_names.count(what);
             };
 
@@ -144,7 +157,8 @@ int mainEntryClickHouseFormat(int argc, char ** argv)
             ParserQuery parser(end);
             do
             {
-                ASTPtr res = parseQueryAndMovePosition(parser, pos, end, "query", multiple, 0, DBMS_DEFAULT_MAX_PARSER_DEPTH);
+                ASTPtr res = parseQueryAndMovePosition(
+                    parser, pos, end, "query", multiple, cmd_settings.max_query_size, cmd_settings.max_parser_depth);
                 /// For insert query with data(INSERT INTO ... VALUES ...), will lead to format fail,
                 /// should throw exception early and make exception message more readable.
                 if (const auto * insert_query = res->as<ASTInsertQuery>(); insert_query && insert_query->data)
@@ -217,6 +231,5 @@ int mainEntryClickHouseFormat(int argc, char ** argv)
         std::cerr << getCurrentExceptionMessage(true) << '\n';
         return getCurrentExceptionCode();
     }
-
     return 0;
 }

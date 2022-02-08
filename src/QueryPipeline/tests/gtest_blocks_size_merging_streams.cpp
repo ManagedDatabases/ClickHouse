@@ -16,7 +16,7 @@ static Block getBlockWithSize(const std::vector<std::string> & columns, size_t r
 
     ColumnsWithTypeAndName cols;
     size_t size_of_row_in_bytes = columns.size() * sizeof(UInt64);
-    for (size_t i = 0; i * sizeof(UInt64) < size_of_row_in_bytes; i++)
+    for (size_t i = 0; i * sizeof(UInt64) < size_of_row_in_bytes; ++i)
     {
         auto column = ColumnUInt64::create(rows, 0);
         for (size_t j = 0; j < rows; ++j)
@@ -83,7 +83,7 @@ TEST(MergingSortedTest, SimpleBlockSizeTest)
     EXPECT_EQ(pipe.numOutputPorts(), 3);
 
     auto transform = std::make_shared<MergingSortedTransform>(pipe.getHeader(), pipe.numOutputPorts(), sort_description,
-            DEFAULT_MERGE_BLOCK_SIZE, 0, false, nullptr, false, true);
+            DEFAULT_MERGE_BLOCK_SIZE, 0, nullptr, false, true);
 
     pipe.addTransform(std::move(transform));
 
@@ -130,7 +130,7 @@ TEST(MergingSortedTest, MoreInterestingBlockSizes)
     EXPECT_EQ(pipe.numOutputPorts(), 3);
 
     auto transform = std::make_shared<MergingSortedTransform>(pipe.getHeader(), pipe.numOutputPorts(), sort_description,
-            DEFAULT_MERGE_BLOCK_SIZE, 0, false, nullptr, false, true);
+            DEFAULT_MERGE_BLOCK_SIZE, 0, nullptr, false, true);
 
     pipe.addTransform(std::move(transform));
 
