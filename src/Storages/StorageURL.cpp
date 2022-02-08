@@ -82,16 +82,28 @@ ColumnsDescription IStorageURLBase::getTableStructureFromData(
     const std::optional<FormatSettings> & format_settings,
     ContextPtr context)
 {
+    auto parsed_uri = Poco::URI(uri);
+    Poco::Net::HTTPBasicCredentials credentials;
+    std::string user_info = parsed_uri.getUserInfo();
+    if (!user_info.empty())
+    {
+        std::size_t n = user_info.find(':');
+        if (n != std::string::npos)
+        {
+            credentials.setUsername(user_info.substr(0, n));
+            credentials.setPassword(user_info.substr(n + 1));
+        }
+    }
+
     auto read_buffer_creator = [&]()
     {
-        auto parsed_uri = Poco::URI(uri);
         return wrapReadBufferWithCompressionMethod(
             std::make_unique<ReadWriteBufferFromHTTP>(
                 parsed_uri,
                 Poco::Net::HTTPRequest::HTTP_GET,
                 nullptr,
                 ConnectionTimeouts::getHTTPTimeouts(context),
-                Poco::Net::HTTPBasicCredentials{},
+                credentials,
                 context->getSettingsRef().max_http_get_redirects,
                 DBMS_DEFAULT_BUFFER_SIZE,
                 context->getReadSettings(),
@@ -146,6 +158,7 @@ namespace
 
         void onCancel() override
         {
+            std::lock_guard lock(reader_mutex);
             if (reader)
                 reader->cancel();
         }
@@ -245,6 +258,7 @@ namespace
         {
             while (true)
             {
+
                 if (!reader)
                 {
                     auto current_uri_pos = uri_info->next_uri_to_read.fetch_add(1);
@@ -252,6 +266,8 @@ namespace
                         return {};
 
                     auto current_uri = uri_info->uri_list_to_read[current_uri_pos];
+
+                    std::lock_guard lock(reader_mutex);
                     initialize(current_uri);
                 }
 
@@ -259,8 +275,11 @@ namespace
                 if (reader->pull(chunk))
                     return chunk;
 
-                pipeline->reset();
-                reader.reset();
+                {
+                    std::lock_guard lock(reader_mutex);
+                    pipeline->reset();
+                    reader.reset();
+                }
             }
         }
 
@@ -274,6 +293,9 @@ namespace
         std::unique_ptr<ReadBuffer> read_buf;
         std::unique_ptr<QueryPipeline> pipeline;
         std::unique_ptr<PullingPipelineExecutor> reader;
+        /// onCancell and generate can be called concurrently and both of them
+        /// have R/W access to reader pointer.
+        std::mutex reader_mutex;
 
         Poco::Net::HTTPBasicCredentials credentials{};
     };
