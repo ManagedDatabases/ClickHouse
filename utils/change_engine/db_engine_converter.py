@@ -42,6 +42,17 @@ class DBEngineConverter:
 
     def __get_needed_action(self, database, temp_database):
         if temp_database.exists:
+
+            intersect_tables = set([table.name for table in database.tables]) & set([table.name for table in temp_database.tables])
+            tables = dict([(table.name, table) for table in database.tables])
+            temp_tables = dict([(table.name, table) for table in temp_database.tables])
+
+            for table in intersect_tables:
+                if tables[table].row_count > temp_tables[table].row_count:
+                    temp_tables[table].drop()
+                else:
+                    tables[table].drop()
+
             answer = self.__user_interactor.ask(
                 f'Changing for database {database.name} failed in previous launch.\n'
                  'Do you want to continue changing? (y/n)\n'
@@ -57,7 +68,7 @@ class DBEngineConverter:
         else:
             return Action.CONVERT
 
-    def convert(self, database_name, engine_from, engine_to): #TODO engine name validation
+    def convert(self, database_name, engine_from, engine_to, safe_rename=True): #TODO engine name validation
         self.__temporary_prefix = f'__temporary_{engine_from}_to_{engine_to}__'
 
         database = Database(database_name, self.__client)
@@ -75,14 +86,14 @@ class DBEngineConverter:
             if not temp_database.exists:
                 temp_database.create(engine=engine_to)
 
-            temp_database.move_tables(database.tables)
+            temp_database.move_tables(database.tables, safe_rename)
             database.drop()
 
             if engine_to == 'Atomic':
                 temp_database.rename(database_name)
             else:
                 database.create(engine=engine_to)
-                database.move_tables(temp_database.tables)
+                database.move_tables(temp_database.tables, safe_rename)
                 temp_database.drop()
 
             assert database.engine == engine_to, 'something went wrong'
@@ -90,8 +101,15 @@ class DBEngineConverter:
             if not database.exists:
                 database.create(engine=engine_from)
 
-            database.move_tables(temp_database.tables)
-            temp_database.drop()
+            if database.engine == engine_from:
+                database.move_tables(temp_database.tables, safe_rename)
+                temp_database.drop()
+            else:
+                temp_database.move_tables(database.tables, safe_rename)
+                database.drop()
+                database.create(engine=engine_from)
+                database.move_tables(temp_database.tables, safe_rename)
+                temp_database.drop()
         elif action == Action.TERMINATE:
             pass
 
